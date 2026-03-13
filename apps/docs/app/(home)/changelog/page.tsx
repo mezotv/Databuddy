@@ -168,14 +168,14 @@ export default async function ChangelogPage() {
 				</div>
 				<div className="py-6">
 					<Link
-						className="mx-auto flex w-fit items-center gap-2 rounded-full border border-border/40 bg-card/30 px-4 py-2 text-muted-foreground/50 transition-colors hover:border-border/60 hover:text-muted-foreground/70"
+						className="mx-auto flex w-fit items-center gap-2 rounded-full bg-card/30 px-4 py-2 text-muted-foreground/50 transition-colors hover:text-muted-foreground/70"
 						href="https://www.usenotra.com"
 						rel="noopener"
 						target="_blank"
 					>
 						<span className="text-xs tracking-wide">Powered by</span>
 						<Image
-							alt=""
+							alt="Notra Logo"
 							aria-hidden
 							className="shrink-0"
 							height={16}
