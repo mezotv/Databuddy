@@ -58,7 +58,13 @@ function formatUrl(url: string, maxLen = 40): string {
 	}
 }
 
-function ExpirationBadge({ date, className }: { date: string | null; className?: string }) {
+function ExpirationBadge({
+	date,
+	className,
+}: {
+	date: string | null;
+	className?: string;
+}) {
 	if (!date) {
 		return null;
 	}
@@ -97,106 +103,93 @@ function LinkRow({
 		onCopy: () => toast.success("Link copied"),
 	});
 
-	const handleCopy = useCallback(
-		(e?: React.MouseEvent) => {
-			e?.stopPropagation();
-			copyToClipboard(`https://${shortUrl}`);
-		},
-		[copyToClipboard, shortUrl]
-	);
+	const handleCopy = useCallback(() => {
+		copyToClipboard(`https://${shortUrl}`);
+	}, [copyToClipboard, shortUrl]);
 
 	return (
-		// biome-ignore lint/a11y/useSemanticElements: Can't use button - contains nested buttons (dropdown trigger, copy button)
 		<div
 			className={cn(
-				"group/link-row flex w-full cursor-pointer gap-3 rounded-sm bg-muted/30 px-2 py-2.5 text-left transition-colors hover:bg-muted",
+				"group/link-row flex w-full gap-3 rounded-sm bg-muted/30 px-2 py-2.5 text-left transition-colors hover:bg-muted",
 				isExpired && "opacity-60"
 			)}
-			onClick={onNavigate}
-			onKeyDown={(e) => {
-				if (e.key === "Enter" || e.key === " ") {
-					e.preventDefault();
-					onNavigate();
-				}
-			}}
-			role="button"
-			tabIndex={0}
 		>
-			<div className="h-max shrink-0 rounded border border-transparent bg-accent p-1.5 text-primary transition-colors group-hover/link-row:bg-primary/10">
-				<LinkIcon className="size-3.5" weight="duotone" />
-			</div>
+			<Button
+				className="min-w-0 flex-1 justify-start gap-3 rounded-none bg-transparent p-0 text-left font-normal text-foreground hover:bg-transparent active:scale-100"
+				onClick={onNavigate}
+				variant="ghost"
+			>
+				<span className="h-max shrink-0 rounded border border-transparent bg-accent p-1.5 text-primary transition-colors group-hover/link-row:bg-primary/10">
+					<LinkIcon className="size-3.5" weight="duotone" />
+				</span>
 
-			<div className="min-w-0 flex-1">
-				<div className="flex items-center gap-2">
-					<p className="truncate font-medium text-sm">{link.name}</p>
-					<ExpirationBadge date={link.expiresAt ?? null} className="rounded py-px px-1.5" />
-				</div>
-				<div className="mt-1 flex items-center gap-2">
-					<button
-						className="flex shrink-0 items-center gap-1.5 rounded border border-transparent bg-muted px-1.5 py-px font-mono text-[10px] transition-colors hover:border-border group-hover/link-row:bg-primary/10"
-						onClick={handleCopy}
-						type="button"
-					>
-						<span>{shortUrl}</span>
-						{isCopied ? (
-							<CheckIcon aria-hidden className="size-2.5 shrink-0" />
-						) : (
-							<CopyIcon
-								className="size-2.5 shrink-0 text-muted-foreground"
-								weight="duotone"
-							/>
-						)}
-					</button>
-					<span className="flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
+				<span className="min-w-0 flex-1">
+					<span className="flex items-center gap-2">
+						<span className="truncate font-medium text-sm">{link.name}</span>
+						<ExpirationBadge
+							className="rounded px-1.5 py-px"
+							date={link.expiresAt ?? null}
+						/>
+					</span>
+					<span className="mt-1 flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
 						<ArrowRightIcon aria-hidden className="size-3 shrink-0" />
 						<span className="truncate text-ring">
 							{formatUrl(link.targetUrl)}
 						</span>
 					</span>
-				</div>
-			</div>
-
-			{link.createdAt && (
-				<span className="hidden shrink-0 text-[11px] text-muted-foreground sm:block">
-					{fromNow(link.createdAt)}
 				</span>
-			)}
 
-			<div
-				className="shrink-0"
-				onClick={(e) => e.stopPropagation()}
-				onKeyDown={(e) => e.stopPropagation()}
-				role="presentation"
+				{link.createdAt && (
+					<span className="hidden shrink-0 text-[11px] text-muted-foreground sm:block">
+						{fromNow(link.createdAt)}
+					</span>
+				)}
+			</Button>
+
+			<Button
+				className="h-auto shrink-0 items-center gap-1.5 self-start rounded border border-transparent bg-muted px-1.5 py-px font-mono text-[10px] hover:border-border hover:bg-primary/10"
+				onClick={handleCopy}
+				variant="ghost"
 			>
-				<DropdownMenu>
-					<DropdownMenu.Trigger
-						aria-label="Actions"
-						className="inline-flex size-7 items-center justify-center gap-1.5 rounded-md bg-secondary p-0 font-medium text-muted-foreground opacity-70 transition-all duration-(--duration-quick) ease-(--ease-smooth) hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:pointer-events-none disabled:opacity-50 group-hover/link-row:bg-interactive-hover group-hover/link-row:text-foreground data-[state=open]:opacity-100"
+				<span>{shortUrl}</span>
+				{isCopied ? (
+					<CheckIcon aria-hidden className="size-2.5 shrink-0" />
+				) : (
+					<CopyIcon
+						className="size-2.5 shrink-0 text-muted-foreground"
+						weight="duotone"
+					/>
+				)}
+			</Button>
+
+			<DropdownMenu>
+				<DropdownMenu.Trigger
+					aria-label="Actions"
+					className="inline-flex size-7 shrink-0 items-center justify-center gap-1.5 rounded-md bg-secondary p-0 font-medium text-muted-foreground opacity-70 transition-all duration-(--duration-quick) ease-(--ease-smooth) hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:pointer-events-none disabled:opacity-50 group-hover/link-row:bg-interactive-hover group-hover/link-row:text-foreground data-[state=open]:opacity-100"
+				>
+					<DotsThreeIcon className="size-4" weight="bold" />
+				</DropdownMenu.Trigger>
+				<DropdownMenu.Content align="end" className="w-40">
+					<DropdownMenu.Item className="gap-2" onClick={handleCopy}>
+						<CopyIcon className="size-4" weight="duotone" />
+						Copy
+					</DropdownMenu.Item>
+					<DropdownMenu.Separator />
+					<DropdownMenu.Item className="gap-2" onClick={onEdit}>
+						<PencilSimpleIcon className="size-4" weight="duotone" />
+						Edit
+					</DropdownMenu.Item>
+					<DropdownMenu.Separator />
+					<DropdownMenu.Item
+						className="gap-2"
+						onClick={onDelete}
+						variant="destructive"
 					>
-						<DotsThreeIcon className="size-4" weight="bold" />
-					</DropdownMenu.Trigger>
-					<DropdownMenu.Content align="end" className="w-40">
-						<DropdownMenu.Item className="gap-2" onClick={handleCopy}>
-							<CopyIcon className="size-4" weight="duotone" />
-							Copy
-						</DropdownMenu.Item>
-						<DropdownMenu.Separator />
-						<DropdownMenu.Item className="gap-2" onClick={onEdit}>
-							<PencilSimpleIcon className="size-4" weight="duotone" />
-							Edit
-						</DropdownMenu.Item>
-						<DropdownMenu.Separator />
-						<DropdownMenu.Item
-							className="gap-2"
-							onClick={onDelete}
-							variant="destructive"
-						>
-							<TrashIcon className="size-4" weight="duotone" />
-							Delete
-						</DropdownMenu.Item>
-					</DropdownMenu.Content>
-				</DropdownMenu>
-			</div>
+						<TrashIcon className="size-4" weight="duotone" />
+						Delete
+					</DropdownMenu.Item>
+				</DropdownMenu.Content>
+			</DropdownMenu>
 		</div>
 	);
 }

@@ -39,10 +39,8 @@ function AnnotationTypeLabel({ type }: { type: string }) {
 		range: "Range",
 	};
 	return (
-		<Badge className="text-[10px] py-0.5! rounded" variant="muted">
-			<span className="mt-px">
-			{labels[type] ?? type}
-			</span>
+		<Badge className="rounded py-0.5! text-[10px]" variant="muted">
+			<span className="mt-px">{labels[type] ?? type}</span>
 		</Badge>
 	);
 }
@@ -71,74 +69,61 @@ function AnnotationRow({
 	const metaLine = `${dateDisplay}${tagsSuffix}${annotation.isPublic ? " · Public" : ""}`;
 
 	return (
-		// biome-ignore lint/a11y/useSemanticElements: Can't use button - contains nested buttons (dropdown trigger)
-		<div
-			className="group/annotation-row flex w-full cursor-pointer items-start gap-3 rounded-sm bg-muted/30 px-2 py-2.5 text-left transition-colors hover:bg-muted"
-			onClick={onNavigate}
-			onKeyDown={(e) => {
-				if (e.key === "Enter" || e.key === " ") {
-					e.preventDefault();
-					onNavigate();
-				}
-			}}
-			role="button"
-			tabIndex={0}
-		>
-			<div className="h-max shrink-0 rounded border border-transparent bg-accent p-1.5 text-primary transition-colors group-hover/annotation-row:bg-primary/10">
-				<NoteIcon className="size-3.5" weight="duotone" />
-			</div>
+		<div className="group/annotation-row flex w-full items-start gap-3 rounded-sm bg-muted/30 px-2 py-2.5 text-left transition-colors hover:bg-muted">
+			<Button
+				className="min-w-0 flex-1 items-start justify-start gap-3 rounded-none bg-transparent p-0 text-left font-normal text-foreground hover:bg-transparent active:scale-100"
+				onClick={onNavigate}
+				variant="ghost"
+			>
+				<span className="h-max shrink-0 rounded border border-transparent bg-accent p-1.5 text-primary transition-colors group-hover/annotation-row:bg-primary/10">
+					<NoteIcon className="size-3.5" weight="duotone" />
+				</span>
 
-			<div className="min-w-0 flex-1">
-				<div className="flex items-center gap-2">
-					<p className="truncate font-medium text-sm">{annotation.text}</p>
-				</div>
-				<p className="mt-1 truncate text-muted-foreground text-xs">
-					<span className="inline-flex items-center gap-1">
-						<CalendarIcon className="size-3 shrink-0" weight="duotone" />
-						{metaLine}
-						<span className="pl-1">
-						<AnnotationTypeLabel type={annotation.annotationType} />
+				<span className="min-w-0 flex-1">
+					<span className="truncate font-medium text-sm">
+						{annotation.text}
+					</span>
+					<span className="mt-1 block truncate text-muted-foreground text-xs">
+						<span className="inline-flex items-center gap-1">
+							<CalendarIcon className="size-3 shrink-0" weight="duotone" />
+							{metaLine}
+							<span className="pl-1">
+								<AnnotationTypeLabel type={annotation.annotationType} />
+							</span>
 						</span>
 					</span>
-				</p>
-			</div>
-
-			{annotation.createdAt && (
-				<span className="hidden shrink-0 text-[11px] text-muted-foreground sm:block pt-0.5">
-					{fromNow(annotation.createdAt)}
 				</span>
-			)}
 
-			<div
-				className="shrink-0"
-				onClick={(e) => e.stopPropagation()}
-				onKeyDown={(e) => e.stopPropagation()}
-				role="presentation"
-			>
-				<DropdownMenu>
-					<DropdownMenu.Trigger
-						aria-label="Actions"
-						className="inline-flex size-7 items-center justify-center gap-1.5 rounded-md bg-secondary p-0 font-medium text-muted-foreground opacity-70 transition-all duration-(--duration-quick) ease-(--ease-smooth) hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:pointer-events-none disabled:opacity-50 group-hover/annotation-row:bg-interactive-hover group-hover/annotation-row:text-foreground data-[state=open]:opacity-100"
+				{annotation.createdAt && (
+					<span className="hidden shrink-0 pt-0.5 text-[11px] text-muted-foreground sm:block">
+						{fromNow(annotation.createdAt)}
+					</span>
+				)}
+			</Button>
+
+			<DropdownMenu>
+				<DropdownMenu.Trigger
+					aria-label="Actions"
+					className="inline-flex size-7 shrink-0 items-center justify-center gap-1.5 rounded-md bg-secondary p-0 font-medium text-muted-foreground opacity-70 transition-all duration-(--duration-quick) ease-(--ease-smooth) hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:pointer-events-none disabled:opacity-50 group-hover/annotation-row:bg-interactive-hover group-hover/annotation-row:text-foreground data-[state=open]:opacity-100"
+				>
+					<DotsThreeIcon className="size-4" weight="bold" />
+				</DropdownMenu.Trigger>
+				<DropdownMenu.Content align="end" className="w-40">
+					<DropdownMenu.Item className="gap-2" onClick={onEdit}>
+						<PencilSimpleIcon className="size-4" weight="duotone" />
+						Edit
+					</DropdownMenu.Item>
+					<DropdownMenu.Separator />
+					<DropdownMenu.Item
+						className="gap-2"
+						onClick={onDelete}
+						variant="destructive"
 					>
-						<DotsThreeIcon className="size-4" weight="bold" />
-					</DropdownMenu.Trigger>
-					<DropdownMenu.Content align="end" className="w-40">
-						<DropdownMenu.Item className="gap-2" onClick={onEdit}>
-							<PencilSimpleIcon className="size-4" weight="duotone" />
-							Edit
-						</DropdownMenu.Item>
-						<DropdownMenu.Separator />
-						<DropdownMenu.Item
-							className="gap-2"
-							onClick={onDelete}
-							variant="destructive"
-						>
-							<TrashIcon className="size-4" weight="duotone" />
-							Delete
-						</DropdownMenu.Item>
-					</DropdownMenu.Content>
-				</DropdownMenu>
-			</div>
+						<TrashIcon className="size-4" weight="duotone" />
+						Delete
+					</DropdownMenu.Item>
+				</DropdownMenu.Content>
+			</DropdownMenu>
 		</div>
 	);
 }

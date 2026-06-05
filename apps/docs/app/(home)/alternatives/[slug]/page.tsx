@@ -86,6 +86,7 @@ export default async function AlternativeToPage({ params }: PageProps) {
 			}
 			introText={introText}
 			migrationSection={migrationSection}
+			pageType="alternatives"
 			pageUrl={pageUrl}
 			pricingTiers={pricingTiers}
 			structuredDescription={description}

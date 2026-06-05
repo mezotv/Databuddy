@@ -1,4 +1,4 @@
-import { ArrowLeftIcon } from "@phosphor-icons/react/ssr";
+import { ArrowLeftIcon } from "@databuddy/ui/icons";
 import type { Metadata } from "next";
 import { headers } from "next/headers";
 import Link from "next/link";

@@ -1,12 +1,16 @@
+import { publicConfig } from "@databuddy/env/public";
 import type { AppRouter } from "@databuddy/rpc";
 import { createORPCClient, onError } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
 import type { RouterClient } from "@orpc/server";
 import { createTanstackQueryUtils } from "@orpc/tanstack-query";
+import { isDashboardE2E } from "@/lib/e2e-mode";
 import { isAbortError } from "@/lib/is-abort-error";
 
+const isE2E = isDashboardE2E;
+
 const link = new RPCLink({
-	url: `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001"}/rpc`,
+	url: `${publicConfig.urls.api}/rpc`,
 	fetch: (request, init) => {
 		const headers = new Headers(request.headers);
 
@@ -28,7 +32,7 @@ const link = new RPCLink({
 	},
 	interceptors: [
 		onError((error) => {
-			if (isAbortError(error)) {
+			if (isE2E || isAbortError(error)) {
 				return;
 			}
 			if (
@@ -58,11 +62,6 @@ export const orpc = createTanstackQueryUtils(client, {
 		},
 		autocomplete: {
 			get: { queryOptions: { staleTime: FIVE_MINUTES } },
-		},
-		featureInvite: {
-			checkAccess: {
-				queryOptions: { staleTime: FIVE_MINUTES, retry: false },
-			},
 		},
 	},
 });

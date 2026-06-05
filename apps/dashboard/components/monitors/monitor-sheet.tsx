@@ -7,12 +7,7 @@ import { toast } from "sonner";
 import { useOrganizationsContext } from "@/components/providers/organizations-provider";
 import { useWebsite } from "@/hooks/use-websites";
 import { orpc } from "@/lib/orpc";
-import {
-	BellIcon,
-	GearIcon,
-	InfoIcon,
-	TimerIcon,
-} from "@databuddy/ui/icons";
+import { BellIcon, GearIcon, InfoIcon } from "@databuddy/ui/icons";
 import { Accordion, Sheet, Switch } from "@databuddy/ui/client";
 import {
 	Badge,
@@ -107,9 +102,7 @@ interface ParsedAlarm {
 	triggerConditions: Record<string, unknown>;
 }
 
-function parseAlarms(
-	rows: readonly Record<string, unknown>[],
-): ParsedAlarm[] {
+function parseAlarms(rows: readonly Record<string, unknown>[]): ParsedAlarm[] {
 	return rows.map((row) => {
 		const r = row as Record<string, unknown>;
 		const tc =
@@ -170,18 +163,19 @@ export function MonitorSheet({
 	});
 
 	const alarms = parseAlarms(
-		(rawAlarms ?? []) as readonly Record<string, unknown>[],
+		(rawAlarms ?? []) as readonly Record<string, unknown>[]
 	);
 
 	const linkedAlarmCount = alarms.filter((a) =>
-		a.linkedIds.includes(schedule?.id ?? ""),
+		a.linkedIds.includes(schedule?.id ?? "")
 	).length;
 
 	const toggleAlarm = async (alarm: ParsedAlarm) => {
-		const isLinked = alarm.linkedIds.includes(schedule!.id);
+		const scheduleId = schedule?.id ?? "";
+		const isLinked = alarm.linkedIds.includes(scheduleId);
 		const nextIds = isLinked
-			? alarm.linkedIds.filter((id) => id !== schedule!.id)
-			: [...alarm.linkedIds, schedule!.id];
+			? alarm.linkedIds.filter((id) => id !== scheduleId)
+			: [...alarm.linkedIds, scheduleId];
 		try {
 			await alarmUpdateMutation.mutateAsync({
 				alarmId: alarm.id,
@@ -219,7 +213,7 @@ export function MonitorSheet({
 		setName(initialName);
 		setUrl(initialUrl);
 		setGranularity(
-			(schedule?.granularity as GranularityValue) ?? "ten_minutes",
+			(schedule?.granularity as GranularityValue) ?? "ten_minutes"
 		);
 		setTimeoutMs(schedule?.timeout ?? null);
 		setCacheBust(schedule?.cacheBust ?? false);
@@ -237,7 +231,7 @@ export function MonitorSheet({
 		setUrlError(
 			isValidUrl(url)
 				? null
-				: "Please enter a valid URL (e.g. https://example.com)",
+				: "Please enter a valid URL (e.g. https://example.com)"
 		);
 	}, [url]);
 
@@ -285,8 +279,7 @@ export function MonitorSheet({
 			}
 			onSaveAction?.();
 			onCloseAction(false);
-		} catch {
-		}
+		} catch {}
 	};
 
 	const advancedCount =
@@ -397,9 +390,7 @@ export function MonitorSheet({
 													min={1}
 													onChange={(e) => {
 														const val = e.target.value;
-														setTimeoutMs(
-															val ? Number(val) * 1000 : null,
-														);
+														setTimeoutMs(val ? Number(val) * 1000 : null);
 													}}
 													placeholder="30"
 													suffix="sec"
@@ -462,12 +453,10 @@ export function MonitorSheet({
 												<div className="space-y-4">
 													{alarms.map((alarm) => {
 														const isLinked = alarm.linkedIds.includes(
-															schedule?.id ?? "",
+															schedule?.id ?? ""
 														);
 														const destSummary = alarm.destinations
-															.map(
-																(d) => DEST_LABELS[d.type] ?? d.type,
-															)
+															.map((d) => DEST_LABELS[d.type] ?? d.type)
 															.join(", ");
 
 														return (
@@ -478,21 +467,14 @@ export function MonitorSheet({
 															>
 																<div className="flex items-center gap-2">
 																	{!alarm.enabled && (
-																		<Badge
-																			size="sm"
-																			variant="muted"
-																		>
+																		<Badge size="sm" variant="muted">
 																			Paused
 																		</Badge>
 																	)}
 																	<Switch
 																		checked={isLinked}
-																		disabled={
-																			alarmUpdateMutation.isPending
-																		}
-																		onCheckedChange={() =>
-																			toggleAlarm(alarm)
-																		}
+																		disabled={alarmUpdateMutation.isPending}
+																		onCheckedChange={() => toggleAlarm(alarm)}
 																	/>
 																</div>
 															</SettingsRow>

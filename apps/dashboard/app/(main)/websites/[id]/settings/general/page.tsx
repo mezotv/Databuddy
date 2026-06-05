@@ -14,7 +14,7 @@ import {
 	type Website,
 } from "@/hooks/use-websites";
 import { orpc } from "@/lib/orpc";
-import { TOAST_MESSAGES } from "../../_components/shared/tracking-constants";
+import { TOAST_MESSAGES } from "../../_components/constants/settings-constants";
 import {
 	CheckIcon,
 	ClipboardIcon,

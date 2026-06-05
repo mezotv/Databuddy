@@ -1,3 +1,3 @@
 "use client";
 
-export { default } from "../../../(main)/websites/[id]/flags/layout";
+export { default } from "@/app/(main)/websites/[id]/flags/layout";

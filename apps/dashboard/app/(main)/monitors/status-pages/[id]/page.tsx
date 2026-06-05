@@ -17,11 +17,11 @@ import {
 	type StatusPageMonitor,
 	StatusPageMonitorRow,
 } from "./_components/status-page-monitor-row";
-import { BrowserIcon } from "@phosphor-icons/react/dist/ssr";
 import {
 	ArrowClockwiseIcon,
 	ArrowSquareOutIcon,
 	HeartbeatIcon,
+	OpenExternalIcon as BrowserIcon,
 	PlusIcon,
 	SirenIcon,
 } from "@databuddy/ui/icons";

@@ -1,6 +1,6 @@
 "use client";
 
-import type { DynamicQueryFilter } from "@databuddy/shared/types/api";
+import type { DynamicQueryFilter } from "@/types/api";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
 import { Controller, useForm } from "react-hook-form";

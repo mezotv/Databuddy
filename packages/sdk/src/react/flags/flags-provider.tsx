@@ -121,10 +121,7 @@ export function FlagsProvider({ children, ...config }: FlagsProviderProps) {
 				return manager.isEnabled(key).on;
 			},
 
-			getValue: <T extends boolean | string | number>(
-				key: string,
-				defaultValue?: T
-			): T => {
+			getValue: <T,>(key: string, defaultValue?: T): T => {
 				const result = store.flags[key];
 				if (result) {
 					return result.value as T;
@@ -155,10 +152,8 @@ export function useFlags(): FlagsContext {
 		return {
 			getFlag: () => toFlagState(undefined, false, false),
 			isOn: () => false,
-			getValue: <T extends boolean | string | number = boolean>(
-				_key: string,
-				defaultValue?: T
-			) => (defaultValue ?? false) as T,
+			getValue: <T = boolean>(_key: string, defaultValue?: T) =>
+				(defaultValue ?? false) as T,
 			fetchFlag: async () => ({
 				enabled: false,
 				value: false,

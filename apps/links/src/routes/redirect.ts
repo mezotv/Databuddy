@@ -1,5 +1,5 @@
-import { db, eq } from "@databuddy/db";
-import { links } from "@databuddy/db/schema";
+import { and, db, eq, isNull } from "@databuddy/db";
+import { config } from "@databuddy/env/app";
 import {
 	type CachedLink,
 	getCachedLink,
@@ -7,6 +7,7 @@ import {
 	setCachedLinkNotFound,
 	shouldRecordClick,
 } from "@databuddy/redis";
+import { links } from "@databuddy/db/schema";
 import { BotCategory, detectBot } from "@databuddy/shared/bot-detection";
 import { resolveDeepLink } from "@databuddy/shared/constants/deep-link-apps";
 import { Elysia, redirect, t } from "elysia";
@@ -16,10 +17,11 @@ import { UAParser } from "ua-parser-js";
 import { captureError, mergeWideEvent, record } from "../lib/logging";
 import { sendLinkVisit } from "../lib/producer";
 import { extractIp, getGeo } from "../utils/geo";
+import { appendRef } from "../utils/url";
 
-const EXPIRED_URL = "https://app.databuddy.cc/dby/expired";
-const NOT_FOUND_URL = "https://app.databuddy.cc/dby/not-found";
-const OG_PROXY_URL = "https://app.databuddy.cc/dby/l";
+const EXPIRED_URL = `${config.urls.dashboard}/dby/expired`;
+const NOT_FOUND_URL = `${config.urls.dashboard}/dby/not-found`;
+const OG_PROXY_URL = `${config.urls.dashboard}/dby/l`;
 
 const NULL_SENTINEL = Object.freeze({ __null: true }) as unknown as CachedLink;
 const linkCache = new LRUCache<string, CachedLink>({ max: 1000, ttl: 5000 });
@@ -128,10 +130,6 @@ function isMobile(ua: string | null): boolean {
 	);
 }
 
-function appendRef(url: string, linkId: string): string {
-	return `${url}${url.includes("?") ? "&" : "?"}ref=${encodeURIComponent(linkId)}`;
-}
-
 function generateETag(link: CachedLink, targetUrl: string): string {
 	const key = `${link.id}:${targetUrl}:${link.expiresAt ?? ""}`;
 	const cached = etagCache.get(key);
@@ -177,24 +175,26 @@ async function lookupLink(slug: string) {
 	}
 
 	const t1 = performance.now();
-	const row = await record("link.db.find", () =>
-		db.query.links.findFirst({
-			where: eq(links.slug, slug),
-			columns: {
-				id: true,
-				targetUrl: true,
-				expiresAt: true,
-				expiredRedirectUrl: true,
-				ogTitle: true,
-				ogDescription: true,
-				ogImageUrl: true,
-				ogVideoUrl: true,
-				iosUrl: true,
-				androidUrl: true,
-				deepLinkApp: true,
-			},
-		})
-	);
+	const row = await record("link.db.find", async () => {
+		const rows = await db
+			.select({
+				id: links.id,
+				targetUrl: links.targetUrl,
+				expiresAt: links.expiresAt,
+				expiredRedirectUrl: links.expiredRedirectUrl,
+				ogTitle: links.ogTitle,
+				ogDescription: links.ogDescription,
+				ogImageUrl: links.ogImageUrl,
+				ogVideoUrl: links.ogVideoUrl,
+				iosUrl: links.iosUrl,
+				androidUrl: links.androidUrl,
+				deepLinkApp: links.deepLinkApp,
+			})
+			.from(links)
+			.where(and(eq(links.slug, slug), isNull(links.deletedAt)))
+			.limit(1);
+		return rows[0] ?? null;
+	});
 	const db_ms = ms(t1);
 
 	if (!row) {
@@ -238,7 +238,7 @@ async function lookupLink(slug: string) {
 
 async function recordClick(
 	link: CachedLink,
-	slug: string,
+	_slug: string,
 	ipHash: string,
 	ip: string,
 	request: Request
@@ -283,7 +283,7 @@ async function recordClick(
 	const geo_ms = ms(t2);
 
 	const t3 = performance.now();
-	const kafkaResult = await record("link.click.kafka", () =>
+	const kafkaResult = await record("link.click.analytics", () =>
 		sendLinkVisit(
 			{
 				link_id: link.id,
@@ -309,9 +309,10 @@ async function recordClick(
 		...(geo.country ? { click_country: geo.country } : {}),
 		kafka_send_success: kafkaResult.kafka_send_success,
 		kafka_connected: kafkaResult.kafka_connected,
+		clickhouse_fallback_success: kafkaResult.clickhouse_fallback_success,
 		"timing.click.dedup": dedup_ms,
 		"timing.click.geo": geo_ms,
-		"timing.click.kafka": kafka_ms,
+		"timing.click.analytics": kafka_ms,
 		"timing.click": ms(t0),
 	});
 }
@@ -322,6 +323,19 @@ const IGNORED_SLUGS = new Set([
 	"sitemap.xml",
 	".well-known",
 ]);
+const SLUG_RE = /^[a-zA-Z0-9_-]{3,50}$/;
+
+function trackClick(
+	link: CachedLink,
+	slug: string,
+	ipHash: string,
+	ip: string,
+	request: Request
+): void {
+	recordClick(link, slug, ipHash, ip, request).catch((err) =>
+		captureError(err, { error_step: "record_click", link_id: link.id })
+	);
+}
 
 export const redirectRoute = new Elysia().get(
 	"/:slug",
@@ -329,7 +343,7 @@ export const redirectRoute = new Elysia().get(
 		const t0 = performance.now();
 		const { slug } = params;
 
-		if (IGNORED_SLUGS.has(slug)) {
+		if (IGNORED_SLUGS.has(slug) || !SLUG_RE.test(slug)) {
 			set.status = 404;
 			return;
 		}
@@ -389,9 +403,7 @@ export const redirectRoute = new Elysia().get(
 		if (link.deepLinkApp && isMobile(userAgent)) {
 			const deepUri = resolveDeepLink(link.deepLinkApp, targetUrl);
 			if (deepUri) {
-				await recordClick(link, slug, ipHash, ip, request).catch((err) =>
-					captureError(err, { error_step: "record_click", link_id: link.id })
-				);
+				trackClick(link, slug, ipHash, ip, request);
 				emit("deep_link");
 				set.headers = { "Cache-Control": "private, no-store" };
 				return redirect(deepUri, 302);
@@ -411,9 +423,7 @@ export const redirectRoute = new Elysia().get(
 			return;
 		}
 
-		await recordClick(link, slug, ipHash, ip, request).catch((err) =>
-			captureError(err, { error_step: "record_click", link_id: link.id })
-		);
+		trackClick(link, slug, ipHash, ip, request);
 
 		emit("success");
 		set.headers = {

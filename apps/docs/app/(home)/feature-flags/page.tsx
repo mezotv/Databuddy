@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Footer } from "@/components/footer";
+import { TrackOnMount } from "@/components/track-on-mount";
 import { CELL_TITLE_CLASS } from "@/components/landing/demo-constants";
 import {
 	FeatureHero,
@@ -18,16 +19,16 @@ import Section from "@/components/landing/section";
 import { StructuredData } from "@/components/structured-data";
 
 export const metadata: Metadata = {
-	title: "Feature Flags & A/B Testing",
+	title: "Feature Flags & A/B Testing - Built Into Your Analytics",
 	description:
-		"Ship features safely with instant rollouts, percentage-based releases, A/B testing, and user targeting. No deploys needed - control everything from your dashboard.",
+		"Ship features safely with instant rollouts, percentage-based releases, A/B testing, and user targeting. No deploys needed. Built into your analytics dashboard.",
 	alternates: {
 		canonical: "https://www.databuddy.cc/feature-flags",
 	},
 	openGraph: {
-		title: "Feature Flags & A/B Testing",
+		title: "Feature Flags & A/B Testing - Built Into Your Analytics",
 		description:
-			"Ship features safely with instant rollouts, percentage-based releases, A/B testing, and user targeting. No deploys needed - control everything from your dashboard.",
+			"Ship features safely with instant rollouts, percentage-based releases, A/B testing, and user targeting. No deploys needed. Built into your analytics dashboard.",
 		url: "https://www.databuddy.cc/feature-flags",
 		images: ["/og-image.png"],
 	},
@@ -66,6 +67,10 @@ const container = "mx-auto w-full max-w-400 px-4 sm:px-14 lg:px-20";
 export default function FeatureFlagsPage() {
 	return (
 		<>
+			<TrackOnMount
+				event="feature_landing_viewed"
+				properties={{ feature: "flags" }}
+			/>
 			<StructuredData
 				elements={[{ type: "faq", items: [...FAQ_ITEMS] }]}
 				page={{
@@ -147,7 +152,7 @@ export default function FeatureFlagsPage() {
 
 				<Section className="border-border border-b" id="faq">
 					<div className={container}>
-						<FaqSection eyebrow="FAQ" items={[...FAQ_ITEMS]} />
+						<FaqSection items={[...FAQ_ITEMS]} />
 					</div>
 				</Section>
 

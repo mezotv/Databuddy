@@ -15,6 +15,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useCustomer, useListPlans } from "autumn-js/react";
 import { useParams, usePathname } from "next/navigation";
 import { createContext, type ReactNode, useContext, useMemo } from "react";
+import { isDashboardE2E } from "@/lib/e2e-mode";
 import { orpc } from "@/lib/orpc";
 
 type HookCustomer = NonNullable<ReturnType<typeof useCustomer>["data"]>;
@@ -106,7 +107,7 @@ export function BillingProvider({
 	public: isPublic,
 	websiteId,
 }: BillingProviderProps) {
-	if (isPublic) {
+	if (isPublic || isDashboardE2E) {
 		return <PublicBillingProvider>{children}</PublicBillingProvider>;
 	}
 	return (

@@ -417,7 +417,9 @@ async function deploy() {
 		}[] = [];
 
 		for (const f of changedFiles) {
-			if (!f.content) continue;
+			if (!f.content) {
+				continue;
+			}
 
 			const result = await uploadFile(f.filename, f.content, f.size);
 			uploadResults.push(result);
@@ -427,11 +429,7 @@ async function deploy() {
 				result.status !== "error"
 			) {
 				const versioned = versionedName(f.filename, version);
-				const versionedResult = await uploadFile(
-					versioned,
-					f.content,
-					f.size
-				);
+				const versionedResult = await uploadFile(versioned, f.content, f.size);
 				uploadResults.push(versionedResult);
 			}
 		}
@@ -451,7 +449,9 @@ async function deploy() {
 			if (uploaded.length > 0) {
 				for (const [filename, sri] of sriHashes) {
 					const f = changedFiles.find((cf) => cf.filename === filename);
-					if (!f?.content) continue;
+					if (!f?.content) {
+						continue;
+					}
 					await insertVersionRow(
 						version,
 						filename,
@@ -473,9 +473,7 @@ async function deploy() {
 
 				if (options.skipNotification) {
 					console.log(
-						chalk.gray(
-							"🔕 Skipping Discord notification (--skip-notification)"
-						)
+						chalk.gray("🔕 Skipping Discord notification (--skip-notification)")
 					);
 				} else {
 					await sendDiscordNotification(

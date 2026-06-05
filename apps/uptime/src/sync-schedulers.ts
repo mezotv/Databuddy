@@ -6,7 +6,7 @@ import {
 	UPTIME_JOB_OPTIONS,
 	uptimeSchedulerId,
 } from "@databuddy/redis";
-import { Data, Effect, Ref } from "effect";
+import { Cause, Data, Effect, Exit, Ref } from "effect";
 import { log } from "evlog";
 
 const CRON_GRANULARITIES: Record<string, string> = {
@@ -27,7 +27,7 @@ class UnknownGranularity extends Data.TaggedError("UnknownGranularity")<{
 
 const syncMonitor = (
 	monitor: { id: string; granularity: string },
-	queue: ReturnType<typeof getUptimeQueue>,
+	queue: ReturnType<typeof getUptimeQueue>
 ) =>
 	Effect.gen(function* () {
 		const schedulerId = uptimeSchedulerId(monitor.id);
@@ -36,7 +36,9 @@ const syncMonitor = (
 			try: () => queue.getJobScheduler(schedulerId),
 			catch: (cause) => cause,
 		});
-		if (existing) return "skipped" as const;
+		if (existing) {
+			return "skipped" as const;
+		}
 
 		const pattern = CRON_GRANULARITIES[monitor.granularity];
 		if (!pattern) {
@@ -44,7 +46,7 @@ const syncMonitor = (
 				new UnknownGranularity({
 					scheduleId: monitor.id,
 					granularity: monitor.granularity,
-				}),
+				})
 			);
 		}
 
@@ -60,7 +62,7 @@ const syncMonitor = (
 							trigger: "scheduled" as const,
 						},
 						opts: UPTIME_JOB_OPTIONS,
-					},
+					}
 				),
 			catch: (cause) => cause,
 		});
@@ -90,25 +92,27 @@ const syncAll = Effect.gen(function* () {
 	for (const monitor of monitors) {
 		yield* syncMonitor(monitor, queue).pipe(
 			Effect.tap((result) =>
-				result === "created" ? Ref.update(created, (n) => n + 1) : Ref.update(skipped, (n) => n + 1),
+				result === "created"
+					? Ref.update(created, (n) => n + 1)
+					: Ref.update(skipped, (n) => n + 1)
 			),
-			Effect.catchTag("UnknownGranularity", (e) => {
-				log.error({
-					sync: "scheduler",
-					schedule_id: e.scheduleId,
-					error_message: `Unknown granularity: ${e.granularity}`,
-				});
-				return Ref.update(failed, (n) => n + 1);
-			}),
 			Effect.catch((error) => {
+				if (error instanceof UnknownGranularity) {
+					log.error({
+						sync: "scheduler",
+						schedule_id: error.scheduleId,
+						error_message: `Unknown granularity: ${error.granularity}`,
+					});
+					return Ref.update(failed, (n) => n + 1);
+				}
+
 				log.error({
 					sync: "scheduler",
 					schedule_id: monitor.id,
-					error_message:
-						error instanceof Error ? error.message : String(error),
+					error_message: error instanceof Error ? error.message : String(error),
 				});
 				return Ref.update(failed, (n) => n + 1);
-			}),
+			})
 		);
 	}
 
@@ -128,5 +132,8 @@ const syncAll = Effect.gen(function* () {
 });
 
 export async function syncSchedulers(): Promise<void> {
-	await Effect.runPromise(syncAll);
+	const exit = await Effect.runPromiseExit(syncAll);
+	if (Exit.isFailure(exit)) {
+		throw Cause.squash(exit.cause);
+	}
 }

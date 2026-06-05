@@ -6,6 +6,56 @@ interface AlarmDestination {
 	type: string;
 }
 
+const FORBIDDEN_WEBHOOK_HEADERS = new Set([
+	"authorization",
+	"content-length",
+	"content-type",
+	"cookie",
+	"host",
+	"connection",
+	"transfer-encoding",
+	"x-forwarded-for",
+	"x-forwarded-host",
+	"x-original-url",
+	"x-real-ip",
+]);
+
+const CRLF_PATTERN = /[\r\n]/;
+const SLACK_WEBHOOK_HOST = "hooks.slack.com";
+
+function isAllowedSlackWebhook(url: string): boolean {
+	try {
+		const parsed = new URL(url);
+		return (
+			parsed.protocol === "https:" && parsed.hostname === SLACK_WEBHOOK_HOST
+		);
+	} catch {
+		return false;
+	}
+}
+
+function sanitizeWebhookHeaders(
+	raw: unknown
+): Record<string, string> | undefined {
+	if (!raw || typeof raw !== "object") {
+		return;
+	}
+	const out: Record<string, string> = {};
+	for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+		if (typeof value !== "string") {
+			continue;
+		}
+		if (FORBIDDEN_WEBHOOK_HEADERS.has(name.toLowerCase())) {
+			continue;
+		}
+		if (CRLF_PATTERN.test(name) || CRLF_PATTERN.test(value)) {
+			continue;
+		}
+		out[name] = value;
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export function buildAlarmNotificationConfig(destinations: AlarmDestination[]) {
 	const clientConfig: Record<string, Record<string, unknown>> = {};
 	const channels: NotificationChannel[] = [];
@@ -14,12 +64,15 @@ export function buildAlarmNotificationConfig(destinations: AlarmDestination[]) {
 		const cfg = (dest.config ?? {}) as Record<string, unknown>;
 
 		if (dest.type === "slack") {
+			if (!isAllowedSlackWebhook(dest.identifier)) {
+				continue;
+			}
 			clientConfig.slack = { webhookUrl: dest.identifier };
 			channels.push("slack");
 		} else if (dest.type === "webhook") {
 			clientConfig.webhook = {
 				url: dest.identifier,
-				headers: cfg.headers as Record<string, string> | undefined,
+				headers: sanitizeWebhookHeaders(cfg.headers),
 			};
 			channels.push("webhook");
 		} else if (dest.type === "email") {
@@ -35,14 +88,13 @@ export function buildAlarmNotificationConfig(destinations: AlarmDestination[]) {
 				}) => {
 					const { Resend } = await import("resend");
 					const apiKey = process.env.RESEND_API_KEY;
-					if (!apiKey) return;
+					if (!apiKey) {
+						return;
+					}
 					const resend = new Resend(apiKey);
 					await resend.emails.send({
-						from:
-							payload.from || "Databuddy <alerts@databuddy.cc>",
-						to: Array.isArray(payload.to)
-							? payload.to
-							: [payload.to],
+						from: payload.from || "Databuddy <alerts@databuddy.cc>",
+						to: Array.isArray(payload.to) ? payload.to : [payload.to],
 						subject: payload.subject,
 						html: payload.html || payload.text || "",
 					});

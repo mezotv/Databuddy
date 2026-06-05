@@ -11,23 +11,22 @@ const CRAWL_DISALLOW = [
 ];
 
 export default function robots(): MetadataRoute.Robots {
+	const allowAll = {
+		allow: "/",
+		disallow: CRAWL_DISALLOW,
+	};
+
 	return {
 		rules: [
-			{
-				userAgent: "*",
-				allow: "/",
-				disallow: CRAWL_DISALLOW,
-			},
-			{
-				userAgent: "GPTBot",
-				allow: "/",
-				disallow: CRAWL_DISALLOW,
-			},
-			{
-				userAgent: "ChatGPT-User",
-				allow: "/",
-				disallow: CRAWL_DISALLOW,
-			},
+			{ userAgent: "*", ...allowAll },
+			{ userAgent: "GPTBot", ...allowAll },
+			{ userAgent: "ChatGPT-User", ...allowAll },
+			{ userAgent: "ClaudeBot", ...allowAll },
+			{ userAgent: "Claude-Web", ...allowAll },
+			{ userAgent: "PerplexityBot", ...allowAll },
+			{ userAgent: "Amazonbot", ...allowAll },
+			{ userAgent: "Google-Extended", ...allowAll },
+			{ userAgent: "Bytespider", ...allowAll },
 		],
 		sitemap: `${SITE_URL}/sitemap.xml`,
 	};

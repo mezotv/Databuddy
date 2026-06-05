@@ -7,6 +7,7 @@ import { Footer } from "@/components/footer";
 import { FaqSection as SharedFaqSection } from "@/components/landing/faq-section";
 import Section from "@/components/landing/section";
 import { StructuredData } from "@/components/structured-data";
+import { TrackOnMount } from "@/components/track-on-mount";
 import type {
 	ComparisonFeature,
 	CompetitorInfo,
@@ -14,6 +15,8 @@ import type {
 	MigrationSection,
 	PricingTier,
 } from "@/lib/comparison-config";
+
+export type ComparisonPageType = "compare" | "switch_from" | "alternatives";
 
 interface ComparisonPageViewProps {
 	competitor: CompetitorInfo;
@@ -25,6 +28,7 @@ interface ComparisonPageViewProps {
 	heroHeading: ReactNode;
 	introText?: string;
 	migrationSection?: MigrationSection;
+	pageType: ComparisonPageType;
 	pageUrl: string;
 	pricingTiers: PricingTier[];
 	structuredDescription: string;
@@ -33,6 +37,7 @@ interface ComparisonPageViewProps {
 
 export function ComparisonPageView({
 	pageUrl,
+	pageType,
 	structuredTitle,
 	structuredDescription,
 	heroHeading,
@@ -50,7 +55,24 @@ export function ComparisonPageView({
 
 	return (
 		<div className="overflow-hidden">
+			<TrackOnMount
+				event="comparison_viewed"
+				properties={{ competitor: competitor.slug, page_type: pageType }}
+			/>
 			<StructuredData
+				elements={
+					faqs.length
+						? [
+								{
+									type: "faq",
+									items: faqs.map((f) => ({
+										question: f.question,
+										answer: f.answer,
+									})),
+								},
+							]
+						: undefined
+				}
 				page={{
 					title: structuredTitle,
 					description: structuredDescription,

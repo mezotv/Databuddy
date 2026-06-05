@@ -1,8 +1,12 @@
 "use client";
 
 import type { SortOption, StatusFilter } from "./use-filtered-status-pages";
-import { SortAscendingIcon, XIcon } from "@phosphor-icons/react/dist/ssr";
-import { FunnelIcon, MagnifyingGlassIcon } from "@databuddy/ui/icons";
+import {
+	ArrowsDownUpIcon as SortAscendingIcon,
+	FunnelIcon,
+	MagnifyingGlassIcon,
+	XMarkIcon as XIcon,
+} from "@databuddy/ui/icons";
 import { Input } from "@databuddy/ui";
 import { DropdownMenu } from "@databuddy/ui/client";
 
@@ -111,9 +115,7 @@ export function StatusPagesSearchBar({
 					</DropdownMenu.Group>
 					<DropdownMenu.Separator />
 					<DropdownMenu.RadioGroup
-						onValueChange={(value) =>
-							onSortByChangeAction(value as SortOption)
-						}
+						onValueChange={(value) => onSortByChangeAction(value as SortOption)}
 						value={sortBy}
 					>
 						<DropdownMenu.RadioItem value="newest">

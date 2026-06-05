@@ -7,31 +7,43 @@ export {
 	createAbortSignalInterceptor,
 	enrichRpcWideEventContext,
 	recordORPCError,
+	setRpcRequestLoggerProvider,
 	setRpcProcedureType,
 } from "./lib/rpc-log-context";
 export { setTrackProperties, setTrackingFn } from "./middleware/track-mutation";
 export {
 	type Context,
+	type PreResolvedAuth,
 	createRPCContext,
+	createServiceAuth,
 	sessionProcedure,
 	trackedProcedure,
 	trackedSessionProcedure,
 } from "./orpc";
 export {
-	isFullyAuthorized,
+	hasApiKeyOrgAccess,
 	type PermissionFor,
 	type PlanId,
 	type ResourceType,
 	type Website,
 	type WithWorkspaceOptions,
 	type Workspace,
+	type WorkspaceTier,
 	websiteInputSchema,
+	withFlagsWrite,
 	withWebsiteRead,
 	withWebsiteWrite,
 	withWorkspace,
 	workspaceInputSchema,
 } from "./procedures/with-workspace";
 export { type AppRouter, appRouter } from "./root";
+export {
+	queueInsightGenerationRun,
+	type QueueInsightGenerationRunInput,
+	type QueueInsightGenerationRunResult,
+} from "./routers/insight-generation";
+export { getNextInsightRunAt } from "./services/insight-schedule";
+export type { SlackIntegrationOutput } from "./routers/integrations";
 export type { WebsiteOutput } from "./routers/websites";
 export {
 	type ExportFormat,
@@ -54,4 +66,6 @@ export {
 	type BillingOwner,
 	getBillingCustomerId,
 	getBillingOwner,
+	getMemberRole,
+	getOrganizationOwnerId,
 } from "./utils/billing";

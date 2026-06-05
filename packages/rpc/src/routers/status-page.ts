@@ -1,12 +1,4 @@
-import {
-	and,
-	db,
-	desc,
-	eq,
-	gte,
-	inArray,
-	withTransaction,
-} from "@databuddy/db";
+import { and, db, desc, eq, inArray, withTransaction } from "@databuddy/db";
 import { chQuery } from "@databuddy/db/clickhouse";
 import {
 	incidentAffectedMonitors,
@@ -18,7 +10,11 @@ import {
 	uptimeSchedules,
 	websites,
 } from "@databuddy/db/schema";
-import { cacheable, invalidateCacheableWithArgs } from "@databuddy/redis";
+import {
+	cacheNamespaces,
+	cacheable,
+	invalidateStatusPageCache,
+} from "@databuddy/redis";
 import { randomUUIDv7 } from "bun";
 import { z } from "zod";
 import { rpcError } from "../errors";
@@ -30,6 +26,58 @@ const monitorsProcedure = protectedProcedure;
 const trackedMonitorsProcedure = trackedProcedure;
 
 const UPTIME_TABLE = "uptime.uptime_monitor";
+
+const DAILY_UPTIME_SQL = `SELECT
+					site_id,
+					date,
+					round(100 * (1 - least(downtime_seconds, 86400) / 86400), 2) as uptime_percentage,
+					total_checks,
+					successful_checks,
+					downtime_seconds,
+					avg_response_time,
+					p95_response_time
+				FROM (
+					SELECT
+						site_id,
+						toDate(ts) as date,
+						toUInt32(countIf(status = 1) + countIf(status = 0)) as total_checks,
+						toUInt32(countIf(status = 1)) as successful_checks,
+						toUInt32(sumIf(
+							least(dateDiff('second', ts, next_ts), 86400),
+							status = 0
+						)) as downtime_seconds,
+						round(avg(total_ms), 2) as avg_response_time,
+						round(quantile(0.95)(total_ms), 2) as p95_response_time
+					FROM (
+						SELECT
+							site_id,
+							timestamp as ts,
+							status,
+							total_ms,
+							leadInFrame(timestamp, 1, now()) OVER (
+								PARTITION BY site_id
+								ORDER BY timestamp ASC
+								ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+							) as next_ts
+						FROM ${UPTIME_TABLE}
+						WHERE
+							site_id IN ({siteIds:Array(String)})
+							AND timestamp >= toDateTime({startDate:String})
+							AND timestamp <= toDateTime(concat({endDate:String}, ' 23:59:59'))
+					)
+					GROUP BY site_id, date
+				)
+				ORDER BY site_id, date ASC`;
+
+const LATEST_CHECK_SQL = `SELECT
+						site_id,
+						max(timestamp) as last_timestamp,
+						argMax(status, timestamp) as last_status,
+						argMax(http_code, timestamp) as last_http_code
+					FROM ${UPTIME_TABLE}
+					WHERE site_id IN ({siteIds:Array(String)})
+						AND timestamp >= now() - INTERVAL 7 DAY
+					GROUP BY site_id`;
 
 const dailyUptimeSchema = z.object({
 	date: z.string(),
@@ -57,8 +105,6 @@ const statusPageCustomizationSchema = z.object({
 	websiteUrl: z.string().nullable(),
 	supportUrl: z.string().nullable(),
 	theme: z.enum(["system", "light", "dark"]).nullable(),
-	hideBranding: z.boolean(),
-	customCss: z.string().nullable(),
 });
 
 const incidentStatus = z.enum([
@@ -137,26 +183,27 @@ async function listPublicStatusPageSitemapEntries() {
 
 function deriveOverallStatus(
 	monitors: { currentStatus: "up" | "down" | "degraded" | "unknown" }[],
-	activeIncidents: {
+	incidents: {
+		status: string;
 		severity: string;
 		affectedMonitors: { impact: string }[];
 	}[] = []
 ): "operational" | "degraded" | "outage" {
-	const activeUnresolved = activeIncidents.filter(
-		(i) => !("resolvedAt" in i && (i as { resolvedAt: unknown }).resolvedAt)
+	const activeIncidents = incidents.filter(
+		(incident) => incident.status !== "resolved"
 	);
 
-	if (activeUnresolved.some((i) => i.severity === "critical")) {
+	if (activeIncidents.some((i) => i.severity === "critical")) {
 		return "outage";
 	}
 	if (
-		activeUnresolved.some((i) =>
+		activeIncidents.some((i) =>
 			i.affectedMonitors.some((m) => m.impact === "down")
 		)
 	) {
 		return "outage";
 	}
-	if (activeUnresolved.length > 0) {
+	if (activeIncidents.length > 0) {
 		return "degraded";
 	}
 
@@ -197,6 +244,68 @@ interface LatestCheckRow {
 	site_id: string;
 }
 
+function getDateRange(days: number) {
+	const today = new Date();
+	const start = new Date(today);
+	start.setDate(start.getDate() - (days - 1));
+	return {
+		startDate: start.toISOString().slice(0, 10),
+		endDate: today.toISOString().slice(0, 10),
+	};
+}
+
+function groupDailyRows(rows: DailyRow[]): Map<string, DailyRow[]> {
+	const grouped = new Map<string, DailyRow[]>();
+	for (const row of rows) {
+		const siteRows = grouped.get(row.site_id);
+		if (siteRows) {
+			siteRows.push(row);
+		} else {
+			grouped.set(row.site_id, [row]);
+		}
+	}
+	return grouped;
+}
+
+function indexLatestChecks(
+	rows: LatestCheckRow[]
+): Map<string, LatestCheckRow> {
+	return new Map(rows.map((row) => [row.site_id, row]));
+}
+
+function applyIncidentImpacts(
+	monitors: z.infer<typeof monitorSchema>[],
+	activeIncidents: z.infer<typeof incidentSchema>[],
+	rows: Array<{ scheduleId: string | null; statusPageMonitorId: string | null }>
+) {
+	const spmToScheduleId = new Map(
+		rows.flatMap((row) =>
+			row.statusPageMonitorId && row.scheduleId
+				? [[row.statusPageMonitorId, row.scheduleId] as const]
+				: []
+		)
+	);
+	const monitorsById = new Map(
+		monitors.map((monitor) => [monitor.id, monitor])
+	);
+
+	for (const incident of activeIncidents) {
+		for (const affectedMonitor of incident.affectedMonitors) {
+			const scheduleId = spmToScheduleId.get(
+				affectedMonitor.statusPageMonitorId
+			);
+			const monitor = scheduleId ? monitorsById.get(scheduleId) : null;
+			if (!monitor) {
+				continue;
+			}
+			if (affectedMonitor.impact === "down" || monitor.currentStatus === "up") {
+				monitor.currentStatus =
+					affectedMonitor.impact === "down" ? "down" : "degraded";
+			}
+		}
+	}
+}
+
 async function _fetchStatusPageData(
 	slug: string,
 	days = 90
@@ -214,8 +323,6 @@ async function _fetchStatusPageData(
 			websiteUrl: statusPages.websiteUrl,
 			supportUrl: statusPages.supportUrl,
 			theme: statusPages.theme,
-			hideBranding: statusPages.hideBranding,
-			customCss: statusPages.customCss,
 			statusPageMonitorId: statusPageMonitors.id,
 			scheduleId: uptimeSchedules.id,
 			websiteId: uptimeSchedules.websiteId,
@@ -251,44 +358,45 @@ async function _fetchStatusPageData(
 		logo: rows[0].orgLogo,
 	};
 
-	const first = rows[0];
 	const statusPageInfo = {
-		name: first.statusPageName,
-		description: first.statusPageDescription,
-		logoUrl: first.logoUrl,
-		faviconUrl: first.faviconUrl,
-		websiteUrl: first.websiteUrl,
-		supportUrl: first.supportUrl,
-		theme: first.theme,
-		hideBranding: first.hideBranding,
-		customCss: first.customCss,
+		name: rows[0].statusPageName,
+		description: rows[0].statusPageDescription,
+		logoUrl: rows[0].logoUrl,
+		faviconUrl: rows[0].faviconUrl,
+		websiteUrl: rows[0].websiteUrl,
+		supportUrl: rows[0].supportUrl,
+		theme: rows[0].theme,
 	};
 
-	const schedules = rows
-		.filter((r) => r.scheduleId)
-		.map((r) => ({
-			id: r.scheduleId as string,
-			websiteId: r.websiteId,
-			displayName: r.monitorDisplayName,
-			name: r.scheduleName,
-			url: r.scheduleUrl as string,
-			hideUrl: r.hideUrl,
-			hideUptimePercentage: r.hideUptimePercentage,
-			hideLatency: r.hideLatency,
-		}));
+	const schedules = rows.flatMap((r) => {
+		if (!(r.scheduleId && r.scheduleUrl)) {
+			return [];
+		}
+		return [
+			{
+				id: r.scheduleId,
+				websiteId: r.websiteId,
+				displayName: r.monitorDisplayName,
+				name: r.scheduleName,
+				url: r.scheduleUrl,
+				hideUrl: r.hideUrl ?? false,
+				hideUptimePercentage: r.hideUptimePercentage ?? false,
+				hideLatency: r.hideLatency ?? false,
+			},
+		];
+	});
 
-	const today = new Date();
-	const ninetyDaysAgo = new Date(today);
-	ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - (days - 1));
+	const { startDate, endDate } = getDateRange(days);
 
-	const startDate = ninetyDaysAgo.toISOString().split("T").at(0) ?? "";
-	const endDate = today.toISOString().split("T").at(0) ?? "";
+	const websiteIds = [
+		...new Set(
+			schedules
+				.map((s) => s.websiteId)
+				.filter((id): id is string => id !== null)
+		),
+	];
 
-	const websiteIds = schedules
-		.map((s) => s.websiteId)
-		.filter((id): id is string => id !== null);
-
-	const siteIds = schedules.map((s) => s.websiteId ?? s.id);
+	const siteIds = [...new Set(schedules.map((s) => s.websiteId ?? s.id))];
 
 	const ninetyDaysAgoDate = new Date();
 	ninetyDaysAgoDate.setDate(ninetyDaysAgoDate.getDate() - 90);
@@ -306,75 +414,21 @@ async function _fetchStatusPageData(
 						.where(inArray(websites.id, websiteIds))
 				: Promise.resolve([]),
 			siteIds.length > 0
-				? chQuery<DailyRow>(
-						`SELECT
-					site_id,
-					date,
-					round(100 * (1 - least(downtime_seconds, 86400) / 86400), 2) as uptime_percentage,
-					total_checks,
-					successful_checks,
-					downtime_seconds,
-					avg_response_time,
-					p95_response_time
-				FROM (
-					SELECT
-						site_id,
-						toDate(ts) as date,
-						toUInt32(countIf(status = 1) + countIf(status = 0)) as total_checks,
-						toUInt32(countIf(status = 1)) as successful_checks,
-						toUInt32(sumIf(
-							least(dateDiff('second', ts, next_ts), 86400),
-							status = 0
-						)) as downtime_seconds,
-						round(avg(total_ms), 2) as avg_response_time,
-						round(quantile(0.95)(total_ms), 2) as p95_response_time
-					FROM (
-						SELECT
-							site_id,
-							timestamp as ts,
-							status,
-							total_ms,
-							leadInFrame(timestamp, 1, now()) OVER (
-								PARTITION BY site_id
-								ORDER BY timestamp ASC
-								ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
-							) as next_ts
-						FROM ${UPTIME_TABLE}
-						WHERE
-							site_id IN ({siteIds:Array(String)})
-							AND timestamp >= toDateTime({startDate:String})
-							AND timestamp <= toDateTime(concat({endDate:String}, ' 23:59:59'))
-					)
-					GROUP BY site_id, date
-				)
-				ORDER BY site_id, date ASC`,
-						{ siteIds, startDate, endDate }
-					)
+				? chQuery<DailyRow>(DAILY_UPTIME_SQL, { siteIds, startDate, endDate })
 				: Promise.resolve([]),
 			siteIds.length > 0
-				? chQuery<LatestCheckRow>(
-						`SELECT
-						site_id,
-						max(timestamp) as last_timestamp,
-						argMax(status, timestamp) as last_status,
-						argMax(http_code, timestamp) as last_http_code
-					FROM ${UPTIME_TABLE}
-					WHERE site_id IN ({siteIds:Array(String)})
-						AND timestamp >= now() - INTERVAL 7 DAY
-					GROUP BY site_id`,
-						{ siteIds }
-					)
+				? chQuery<LatestCheckRow>(LATEST_CHECK_SQL, { siteIds })
 				: Promise.resolve([]),
 			db.query.incidents.findMany({
-				where: and(
-					eq(incidents.statusPageId, rows[0].statusPageId),
-					gte(incidents.createdAt, ninetyDaysAgoDate)
-				),
-				orderBy: [desc(incidents.createdAt)],
+				where: {
+					statusPageId: rows[0].statusPageId,
+					createdAt: { gte: ninetyDaysAgoDate },
+				},
+				orderBy: { createdAt: "desc" },
 				limit: 50,
 				with: {
 					updates: {
-						orderBy: [desc(incidentUpdates.createdAt)],
+						orderBy: { createdAt: "desc" },
 						limit: 20,
 					},
 					affectedMonitors: true,
@@ -384,20 +438,8 @@ async function _fetchStatusPageData(
 
 	const websiteMap = new Map(websiteRows.map((w) => [w.id, w] as const));
 
-	const dailyBySite = new Map<string, DailyRow[]>();
-	for (const row of allDailyData) {
-		const existing = dailyBySite.get(row.site_id);
-		if (existing) {
-			existing.push(row);
-		} else {
-			dailyBySite.set(row.site_id, [row]);
-		}
-	}
-
-	const latestBySite = new Map<string, LatestCheckRow>();
-	for (const row of allRecentChecks) {
-		latestBySite.set(row.site_id, row);
-	}
+	const dailyBySite = groupDailyRows(allDailyData);
+	const latestBySite = indexLatestChecks(allRecentChecks);
 
 	const monitors = schedules.map((schedule) => {
 		const siteId = schedule.websiteId ?? schedule.id;
@@ -511,28 +553,7 @@ async function _fetchStatusPageData(
 		(i) => i.status !== "resolved"
 	);
 
-	const spmToScheduleId = new Map(
-		rows
-			.filter((r) => r.scheduleId)
-			.map((r) => [r.statusPageMonitorId, r.scheduleId] as const)
-	);
-
-	for (const incident of activeIncidents) {
-		for (const am of incident.affectedMonitors) {
-			const scheduleId = spmToScheduleId.get(am.statusPageMonitorId);
-			if (!scheduleId) {
-				continue;
-			}
-			const monitor = monitors.find((m) => m.id === scheduleId);
-			if (!monitor) {
-				continue;
-			}
-			const impact = am.impact as "degraded" | "down";
-			if (impact === "down" || monitor.currentStatus === "up") {
-				monitor.currentStatus = impact === "down" ? "down" : "degraded";
-			}
-		}
-	}
+	applyIncidentImpacts(monitors, activeIncidents, rows);
 
 	return {
 		organization: org,
@@ -545,7 +566,7 @@ async function _fetchStatusPageData(
 
 const fetchStatusPageData = cacheable(_fetchStatusPageData, {
 	expireInSec: 60,
-	prefix: "status-page",
+	prefix: cacheNamespaces.statusPage,
 	staleWhileRevalidate: true,
 	staleTime: 30,
 });
@@ -605,8 +626,8 @@ export const statusPageRouter = {
 			});
 
 			const pages = await db.query.statusPages.findMany({
-				where: eq(statusPages.organizationId, input.organizationId),
-				orderBy: (statusPages, { desc }) => [desc(statusPages.createdAt)],
+				where: { organizationId: input.organizationId },
+				orderBy: { createdAt: "desc" },
 				with: {
 					statusPageMonitors: {
 						columns: { id: true },
@@ -635,7 +656,7 @@ export const statusPageRouter = {
 		)
 		.handler(async ({ context, input }) => {
 			const statusPage = await db.query.statusPages.findFirst({
-				where: eq(statusPages.id, input.statusPageId),
+				where: { id: input.statusPageId },
 				with: {
 					statusPageMonitors: {
 						with: {
@@ -648,7 +669,7 @@ export const statusPageRouter = {
 								},
 							},
 						},
-						orderBy: (monitors, { asc }) => [asc(monitors.order)],
+						orderBy: { order: "asc" },
 					},
 				},
 			});
@@ -689,8 +710,6 @@ export const statusPageRouter = {
 				websiteUrl: z.string().url().nullish(),
 				supportUrl: z.string().url().nullish(),
 				theme: z.enum(["system", "light", "dark"]).optional(),
-				hideBranding: z.boolean().optional(),
-				customCss: z.string().nullish(),
 			})
 		)
 		.handler(async ({ context, input }) => {
@@ -702,7 +721,7 @@ export const statusPageRouter = {
 			});
 
 			const existing = await db.query.statusPages.findFirst({
-				where: eq(statusPages.slug, input.slug),
+				where: { slug: input.slug },
 			});
 
 			if (existing) {
@@ -722,12 +741,10 @@ export const statusPageRouter = {
 				websiteUrl: input.websiteUrl ?? null,
 				supportUrl: input.supportUrl ?? null,
 				theme: input.theme ?? "system",
-				hideBranding: input.hideBranding ?? false,
-				customCss: input.customCss ?? null,
 			});
 
 			return db.query.statusPages.findFirst({
-				where: eq(statusPages.id, id),
+				where: { id },
 			});
 		}),
 
@@ -749,13 +766,11 @@ export const statusPageRouter = {
 				websiteUrl: z.string().url().nullish(),
 				supportUrl: z.string().url().nullish(),
 				theme: z.enum(["system", "light", "dark"]).optional(),
-				hideBranding: z.boolean().optional(),
-				customCss: z.string().nullish(),
 			})
 		)
 		.handler(async ({ context, input }) => {
 			const statusPage = await db.query.statusPages.findFirst({
-				where: eq(statusPages.id, input.statusPageId),
+				where: { id: input.statusPageId },
 			});
 
 			if (!statusPage) {
@@ -770,7 +785,7 @@ export const statusPageRouter = {
 
 			if (input.slug && input.slug !== statusPage.slug) {
 				const existing = await db.query.statusPages.findFirst({
-					where: eq(statusPages.slug, input.slug),
+					where: { slug: input.slug },
 				});
 
 				if (existing) {
@@ -797,21 +812,17 @@ export const statusPageRouter = {
 						supportUrl: input.supportUrl,
 					}),
 					...(input.theme !== undefined && { theme: input.theme }),
-					...(input.hideBranding !== undefined && {
-						hideBranding: input.hideBranding,
-					}),
-					...(input.customCss !== undefined && { customCss: input.customCss }),
 					updatedAt: new Date(),
 				})
 				.where(eq(statusPages.id, input.statusPageId));
 
-			await invalidateCacheableWithArgs("status-page", [statusPage.slug]);
+			await invalidateStatusPageCache(statusPage.slug);
 			if (input.slug && input.slug !== statusPage.slug) {
-				await invalidateCacheableWithArgs("status-page", [input.slug]);
+				await invalidateStatusPageCache(input.slug);
 			}
 
 			return db.query.statusPages.findFirst({
-				where: eq(statusPages.id, input.statusPageId),
+				where: { id: input.statusPageId },
 			});
 		}),
 
@@ -829,7 +840,7 @@ export const statusPageRouter = {
 		)
 		.handler(async ({ context, input }) => {
 			const statusPage = await db.query.statusPages.findFirst({
-				where: eq(statusPages.id, input.statusPageId),
+				where: { id: input.statusPageId },
 			});
 
 			if (!statusPage) {
@@ -846,7 +857,7 @@ export const statusPageRouter = {
 				.delete(statusPages)
 				.where(eq(statusPages.id, input.statusPageId));
 
-			await invalidateCacheableWithArgs("status-page", [statusPage.slug]);
+			await invalidateStatusPageCache(statusPage.slug);
 
 			return { success: true };
 		}),
@@ -868,7 +879,7 @@ export const statusPageRouter = {
 		.output(z.object({ success: z.literal(true) }))
 		.handler(async ({ context, input }) => {
 			const statusPage = await db.query.statusPages.findFirst({
-				where: eq(statusPages.id, input.statusPageId),
+				where: { id: input.statusPageId },
 				with: {
 					statusPageMonitors: {
 						columns: { uptimeScheduleId: true },
@@ -924,7 +935,7 @@ export const statusPageRouter = {
 				}
 			});
 
-			await invalidateCacheableWithArgs("status-page", [statusPage.slug]);
+			await invalidateStatusPageCache(statusPage.slug);
 
 			return { success: true };
 		}),
@@ -944,7 +955,7 @@ export const statusPageRouter = {
 		)
 		.handler(async ({ context, input }) => {
 			const statusPage = await db.query.statusPages.findFirst({
-				where: eq(statusPages.id, input.statusPageId),
+				where: { id: input.statusPageId },
 			});
 
 			if (!statusPage) {
@@ -957,11 +968,26 @@ export const statusPageRouter = {
 				permissions: ["update"],
 			});
 
+			const schedule = await db.query.uptimeSchedules.findFirst({
+				where: { id: input.uptimeScheduleId },
+				columns: { organizationId: true },
+			});
+
+			if (!schedule) {
+				throw rpcError.notFound("UptimeSchedule", input.uptimeScheduleId);
+			}
+
+			if (schedule.organizationId !== statusPage.organizationId) {
+				throw rpcError.forbidden(
+					"Uptime schedule does not belong to this status page's organization"
+				);
+			}
+
 			const existing = await db.query.statusPageMonitors.findFirst({
-				where: and(
-					eq(statusPageMonitors.statusPageId, input.statusPageId),
-					eq(statusPageMonitors.uptimeScheduleId, input.uptimeScheduleId)
-				),
+				where: {
+					statusPageId: input.statusPageId,
+					uptimeScheduleId: input.uptimeScheduleId,
+				},
 			});
 
 			if (existing) {
@@ -976,10 +1002,10 @@ export const statusPageRouter = {
 				uptimeScheduleId: input.uptimeScheduleId,
 			});
 
-			await invalidateCacheableWithArgs("status-page", [statusPage.slug]);
+			await invalidateStatusPageCache(statusPage.slug);
 
 			return db.query.statusPageMonitors.findFirst({
-				where: eq(statusPageMonitors.id, id),
+				where: { id },
 			});
 		}),
 
@@ -998,7 +1024,7 @@ export const statusPageRouter = {
 		)
 		.handler(async ({ context, input }) => {
 			const statusPage = await db.query.statusPages.findFirst({
-				where: eq(statusPages.id, input.statusPageId),
+				where: { id: input.statusPageId },
 			});
 
 			if (!statusPage) {
@@ -1020,7 +1046,7 @@ export const statusPageRouter = {
 					)
 				);
 
-			await invalidateCacheableWithArgs("status-page", [statusPage.slug]);
+			await invalidateStatusPageCache(statusPage.slug);
 
 			return { success: true };
 		}),
@@ -1044,7 +1070,7 @@ export const statusPageRouter = {
 		)
 		.handler(async ({ context, input }) => {
 			const monitor = await db.query.statusPageMonitors.findFirst({
-				where: eq(statusPageMonitors.id, input.monitorId),
+				where: { id: input.monitorId },
 				with: {
 					statusPage: true,
 				},
@@ -1078,12 +1104,10 @@ export const statusPageRouter = {
 				})
 				.where(eq(statusPageMonitors.id, input.monitorId));
 
-			await invalidateCacheableWithArgs("status-page", [
-				monitor.statusPage.slug,
-			]);
+			await invalidateStatusPageCache(monitor.statusPage.slug);
 
 			return db.query.statusPageMonitors.findFirst({
-				where: eq(statusPageMonitors.id, input.monitorId),
+				where: { id: input.monitorId },
 			});
 		}),
 
@@ -1114,7 +1138,7 @@ export const statusPageRouter = {
 		.handler(async ({ context, input }) => {
 			setTrackProperties({ severity: input.severity ?? "minor" });
 			const statusPage = await db.query.statusPages.findFirst({
-				where: eq(statusPages.id, input.statusPageId),
+				where: { id: input.statusPageId },
 			});
 
 			if (!statusPage) {
@@ -1126,6 +1150,24 @@ export const statusPageRouter = {
 				resource: "website",
 				permissions: ["update"],
 			});
+
+			if (input.affectedMonitors.length > 0) {
+				const monitorIds = input.affectedMonitors.map(
+					(am) => am.statusPageMonitorId
+				);
+				const ownedMonitors = await db.query.statusPageMonitors.findMany({
+					where: {
+						statusPageId: input.statusPageId,
+						id: { in: monitorIds },
+					},
+					columns: { id: true },
+				});
+				if (ownedMonitors.length !== monitorIds.length) {
+					throw rpcError.badRequest(
+						"Affected monitors must belong to this status page"
+					);
+				}
+			}
 
 			const incidentId = randomUUIDv7();
 			const updateId = randomUUIDv7();
@@ -1158,10 +1200,10 @@ export const statusPageRouter = {
 				}
 			});
 
-			await invalidateCacheableWithArgs("status-page", [statusPage.slug]);
+			await invalidateStatusPageCache(statusPage.slug);
 
 			return db.query.incidents.findFirst({
-				where: eq(incidents.id, incidentId),
+				where: { id: incidentId },
 				with: { updates: true, affectedMonitors: true },
 			});
 		}),
@@ -1183,7 +1225,7 @@ export const statusPageRouter = {
 		.handler(async ({ context, input }) => {
 			setTrackProperties({ status: input.status });
 			const incident = await db.query.incidents.findFirst({
-				where: eq(incidents.id, input.incidentId),
+				where: { id: input.incidentId },
 				with: { statusPage: true },
 			});
 
@@ -1214,13 +1256,11 @@ export const statusPageRouter = {
 					.where(eq(incidents.id, input.incidentId));
 			});
 
-			await invalidateCacheableWithArgs("status-page", [
-				incident.statusPage.slug,
-			]);
+			await invalidateStatusPageCache(incident.statusPage.slug);
 
 			return db.query.incidents.findFirst({
-				where: eq(incidents.id, input.incidentId),
-				with: { updates: { orderBy: [desc(incidentUpdates.createdAt)] } },
+				where: { id: input.incidentId },
+				with: { updates: { orderBy: { createdAt: "desc" } } },
 			});
 		}),
 
@@ -1234,7 +1274,7 @@ export const statusPageRouter = {
 		.input(z.object({ incidentId: z.string() }))
 		.handler(async ({ context, input }) => {
 			const incident = await db.query.incidents.findFirst({
-				where: eq(incidents.id, input.incidentId),
+				where: { id: input.incidentId },
 				with: { statusPage: true },
 			});
 
@@ -1250,9 +1290,7 @@ export const statusPageRouter = {
 
 			await db.delete(incidents).where(eq(incidents.id, input.incidentId));
 
-			await invalidateCacheableWithArgs("status-page", [
-				incident.statusPage.slug,
-			]);
+			await invalidateStatusPageCache(incident.statusPage.slug);
 
 			return { deleted: true };
 		}),
@@ -1267,7 +1305,7 @@ export const statusPageRouter = {
 		.input(z.object({ statusPageId: z.string() }))
 		.handler(async ({ context, input }) => {
 			const statusPage = await db.query.statusPages.findFirst({
-				where: eq(statusPages.id, input.statusPageId),
+				where: { id: input.statusPageId },
 			});
 
 			if (!statusPage) {
@@ -1281,11 +1319,11 @@ export const statusPageRouter = {
 			});
 
 			return db.query.incidents.findMany({
-				where: eq(incidents.statusPageId, input.statusPageId),
-				orderBy: [desc(incidents.createdAt)],
+				where: { statusPageId: input.statusPageId },
+				orderBy: { createdAt: "desc" },
 				with: {
 					updates: {
-						orderBy: [desc(incidentUpdates.createdAt)],
+						orderBy: { createdAt: "desc" },
 					},
 					affectedMonitors: {
 						with: {

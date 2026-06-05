@@ -1,14 +1,7 @@
 "use client";
 
 import { useAtom, useAtomValue, useSetAtom } from "jotai";
-import {
-	useCallback,
-	useEffect,
-	memo,
-	useMemo,
-	useRef,
-	useState,
-} from "react";
+import { useCallback, useEffect, memo, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
 	BrainIcon,
@@ -24,23 +17,33 @@ import {
 } from "@databuddy/ui/icons";
 import { useChat, usePendingQueue } from "@/contexts/chat-context";
 import { cn } from "@/lib/utils";
+import { FaviconImage } from "@/components/analytics/favicon-image";
 import {
 	useBillingContext,
 	useUsageFeature,
 } from "@/components/providers/billing-provider";
+import { type Website, useWebsitesLight } from "@/hooks/use-websites";
 import {
 	AGENT_TIERS,
 	AGENT_THINKING_LEVELS,
 	TIER_SUPPORTS_THINKING,
+	type AgentMention,
 	type AgentTier,
 	type AgentThinking,
 	agentCreditShakeNonceAtom,
 	agentInputAtom,
+	agentMentionsAtom,
 	agentTierAtom,
 	agentThinkingAtom,
 } from "./agent-atoms";
 import { AgentCommandMenu } from "./agent-command-menu";
 import { type AgentCommand, filterCommands } from "./agent-commands";
+import { AgentMentionMenu } from "./agent-mention-menu";
+import {
+	filterMentionWebsites,
+	getMentionQuery,
+	stripMentionQuery,
+} from "./agent-mentions";
 import {
 	AgentTextSwitch,
 	AGENT_INPUT_PLACEHOLDER_PHRASES,
@@ -50,10 +53,12 @@ import { DropdownMenu } from "@databuddy/ui/client";
 import { Button, Skeleton, Textarea, Tooltip } from "@databuddy/ui";
 
 export function AgentInput() {
-	const { sendMessage, stop, status } = useChat();
+	const { sendMessage, setMessages, stop, status } = useChat();
 	const { messages: pendingMessages, removeAction } = usePendingQueue();
 	const isLoading = status === "streaming" || status === "submitted";
 	const [input, setInput] = useAtom(agentInputAtom);
+	const [mentions, setMentions] = useAtom(agentMentionsAtom);
+	const { websites } = useWebsitesLight();
 	const bumpCreditShake = useSetAtom(agentCreditShakeNonceAtom);
 	const { balance, unlimited } = useUsageFeature("agent_credits");
 	const { customer, isLoading: billingLoading } = useBillingContext();
@@ -63,6 +68,8 @@ export function AgentInput() {
 	const { formRef, onKeyDown } = useEnterSubmit();
 	const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
 	const [commandsDismissed, setCommandsDismissed] = useState(false);
+	const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
+	const [mentionsDismissed, setMentionsDismissed] = useState(false);
 	const [placeholderReplayKey, setPlaceholderReplayKey] = useState(0);
 	const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 	const replayFrameRef = useRef<number | null>(null);
@@ -108,8 +115,28 @@ export function AgentInput() {
 		return filterCommands(query);
 	}, [input]);
 
+	const mentionQuery = useMemo(() => getMentionQuery(input), [input]);
+	const mentionedIds = useMemo(
+		() => new Set(mentions.map((m) => m.id)),
+		[mentions]
+	);
+	const mentionResults = useMemo(() => {
+		if (mentionQuery === null) {
+			return [];
+		}
+		return filterMentionWebsites(websites, mentionQuery, mentionedIds);
+	}, [mentionQuery, websites, mentionedIds]);
+
+	const showMentions =
+		!(mentionsDismissed || isLoading) && mentionResults.length > 0;
+	const safeMentionIndex =
+		mentionResults.length === 0
+			? 0
+			: Math.min(selectedMentionIndex, mentionResults.length - 1);
+
 	const showCommands =
-		!(commandsDismissed || isLoading) && filteredCommands.length > 0;
+		!(commandsDismissed || isLoading || showMentions) &&
+		filteredCommands.length > 0;
 	const safeCommandIndex =
 		filteredCommands.length === 0
 			? 0
@@ -135,14 +162,77 @@ export function AgentInput() {
 	};
 
 	const selectCommand = (command: AgentCommand) => {
+		if (command.action === "clear") {
+			setMessages([]);
+			setInput("");
+			setCommandsDismissed(true);
+			return;
+		}
 		setInput(command.prompt);
 		setSelectedCommandIndex(0);
 		setCommandsDismissed(true);
 	};
 
+	const selectMention = useCallback(
+		(website: Website) => {
+			setMentions((prev) =>
+				prev.some((m) => m.id === website.id)
+					? prev
+					: [
+							...prev,
+							{
+								id: website.id,
+								label: website.name ?? website.domain,
+								domain: website.domain,
+							},
+						]
+			);
+			setInput(stripMentionQuery(inputSyncRef.current));
+			setSelectedMentionIndex(0);
+			requestAnimationFrame(() => textareaRef.current?.focus());
+		},
+		[setMentions, setInput]
+	);
+
+	const removeMention = (id: string) => {
+		setMentions((prev) => prev.filter((m) => m.id !== id));
+	};
+
 	const handleMessageKeyDown = (
 		event: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>
 	) => {
+		if (showMentions) {
+			if (event.key === "ArrowDown") {
+				event.preventDefault();
+				setSelectedMentionIndex((prev) => (prev + 1) % mentionResults.length);
+				return;
+			}
+			if (event.key === "ArrowUp") {
+				event.preventDefault();
+				setSelectedMentionIndex(
+					(prev) => (prev - 1 + mentionResults.length) % mentionResults.length
+				);
+				return;
+			}
+			if (event.key === "Escape") {
+				event.preventDefault();
+				setMentionsDismissed(true);
+				return;
+			}
+			if (
+				(event.key === "Enter" &&
+					!event.shiftKey &&
+					!event.nativeEvent.isComposing) ||
+				event.key === "Tab"
+			) {
+				event.preventDefault();
+				const target = mentionResults[safeMentionIndex];
+				if (target) {
+					selectMention(target);
+				}
+				return;
+			}
+		}
 		if (showCommands) {
 			if (event.key === "ArrowDown") {
 				event.preventDefault();
@@ -192,14 +282,56 @@ export function AgentInput() {
 			setCommandsDismissed(false);
 		}
 		setSelectedCommandIndex(0);
+		setMentionsDismissed(false);
+		setSelectedMentionIndex(0);
 	};
 
-	return (
-		<form
-			className="z-10 mt-auto"
-			onSubmit={handleSubmit}
-			ref={formRef}
+	const inputSurface = (
+		<div
+			className={cn(
+				"space-y-1.5 rounded-lg border border-border/60 bg-muted p-1 shadow-sm transition-colors",
+				"focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50"
+			)}
 		>
+			<section className="relative">
+				<div className="pointer-events-none absolute inset-x-3 top-3 max-w-full">
+					<AgentTextSwitch
+						active={input.length === 0 && !isLoading}
+						className="text-muted-foreground/80 text-sm"
+						key={placeholderReplayKey}
+						nostagger
+						phrases={AGENT_INPUT_PLACEHOLDER_PHRASES}
+					/>
+				</div>
+				<Textarea
+					aria-label="Ask Databunny about your analytics, or type slash for commands"
+					className={cn(
+						"relative min-h-0! resize-none border-0 bg-transparent text-sm shadow-none",
+						"focus-visible:border-0 focus-visible:bg-transparent focus-visible:shadow-none focus-visible:ring-0",
+						"px-3 pt-3 pb-2"
+					)}
+					maxRows={8}
+					minRows={1}
+					onBlur={() => schedulePlaceholderReplayIfIdle(false)}
+					onChange={(e) => handleInputChange(e.target.value)}
+					onKeyDown={handleMessageKeyDown}
+					ref={textareaRef}
+					rows={1}
+					showFocusIndicator={false}
+					value={input}
+				/>
+			</section>
+
+			<InputToolbar
+				canSend={Boolean(input.trim())}
+				isLoading={isLoading}
+				onStop={stop}
+			/>
+		</div>
+	);
+
+	return (
+		<form className="z-10 mt-auto" onSubmit={handleSubmit} ref={formRef}>
 			{pendingMessages.length > 0 ? (
 				<PendingPill
 					messages={pendingMessages}
@@ -208,88 +340,20 @@ export function AgentInput() {
 				/>
 			) : null}
 
+			{mentions.length > 0 ? (
+				<MentionPills mentions={mentions} onRemove={removeMention} />
+			) : null}
+
 			<AgentCommandMenu
 				anchor={
-					<div
-						className={cn(
-							"rounded-lg border border-border/60 bg-muted p-1 shadow-sm transition-colors space-y-1.5",
-							"focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50"
-						)}
-					>
-						<section className="relative">
-							<div className="pointer-events-none absolute inset-x-3 top-3 max-w-full">
-								<AgentTextSwitch
-									active={input.length === 0 && !isLoading}
-									className="text-muted-foreground/80 text-sm"
-									key={placeholderReplayKey}
-									phrases={AGENT_INPUT_PLACEHOLDER_PHRASES}
-									nostagger
-								/>
-							</div>
-							<Textarea
-								aria-label="Ask Databunny about your analytics, or type slash for commands"
-								className={cn(
-									"relative min-h-0! resize-none border-0 bg-transparent text-sm shadow-none",
-									"focus-visible:border-0 focus-visible:bg-transparent focus-visible:shadow-none focus-visible:ring-0",
-									"px-3 pt-3 pb-2"
-								)}
-								maxRows={8}
-								minRows={1}
-								rows={1}
-								onBlur={() => schedulePlaceholderReplayIfIdle(false)}
-								onChange={(e) => handleInputChange(e.target.value)}
-								onKeyDown={handleMessageKeyDown}
-								ref={textareaRef}
-								showFocusIndicator={false}
-								value={input}
-							/>
-						</section>
-
-						<div className="flex items-center justify-between gap-3 border-border/60 bg-background px-1.5 py-1.5 rounded">
-							<div className="flex gap-1">
-								<Tooltip content="Attach file (coming soon)" side="top">
-									<Button
-										variant="secondary"
-										aria-label="Attach file"
-										className="size-7"
-										disabled
-										size="icon"
-										type="button"
-									>
-										<PaperclipIcon className="size-3.5" />
-									</Button>
-								</Tooltip>
-								<TierControl />
-								<ThinkingControl />
-							</div>
-
-							<div className="flex shrink-0 items-center gap-3 ml-auto">
-								<KeyboardHints isLoading={isLoading} />
-								{isLoading ? (
-									<Button
-										aria-label="Stop generation"
-										className="size-7"
-										onClick={stop}
-										size="icon"
-										type="button"
-										variant="default"
-									>
-										<MediaStopIcon className="size-3.5" />
-									</Button>
-								) : (
-									<Button
-										aria-label="Send message"
-										className="size-7"
-										disabled={!input.trim()}
-										size="icon"
-										type="submit"
-									>
-										<PaperPlaneIcon className="size-3.5" />
-									</Button>
-								)}
-							</div>
-						</div>
-					</div>
+					<AgentMentionMenu
+						anchor={inputSurface}
+						onHover={setSelectedMentionIndex}
+						onSelect={selectMention}
+						open={showMentions}
+						selectedIndex={safeMentionIndex}
+						websites={mentionResults}
+					/>
 				}
 				commands={filteredCommands}
 				onHover={setSelectedCommandIndex}
@@ -300,6 +364,63 @@ export function AgentInput() {
 		</form>
 	);
 }
+
+const InputToolbar = memo(function InputToolbar({
+	canSend,
+	isLoading,
+	onStop,
+}: {
+	canSend: boolean;
+	isLoading: boolean;
+	onStop: () => void;
+}) {
+	return (
+		<div className="flex items-center justify-between gap-3 rounded border-border/60 bg-background px-1.5 py-1.5">
+			<div className="flex gap-1">
+				<Tooltip content="Attach file (coming soon)" side="top">
+					<Button
+						aria-label="Attach file"
+						className="size-7"
+						disabled
+						size="icon"
+						type="button"
+						variant="secondary"
+					>
+						<PaperclipIcon className="size-3.5" />
+					</Button>
+				</Tooltip>
+				<TierControl />
+				<ThinkingControl />
+			</div>
+
+			<div className="ml-auto flex shrink-0 items-center gap-3">
+				<KeyboardHints isLoading={isLoading} />
+				{isLoading ? (
+					<Button
+						aria-label="Stop generation"
+						className="size-7"
+						onClick={onStop}
+						size="icon"
+						type="button"
+						variant="default"
+					>
+						<MediaStopIcon className="size-3.5" />
+					</Button>
+				) : (
+					<Button
+						aria-label="Send message"
+						className="size-7"
+						disabled={!canSend}
+						size="icon"
+						type="submit"
+					>
+						<PaperPlaneIcon className="size-3.5" />
+					</Button>
+				)}
+			</div>
+		</div>
+	);
+});
 
 const THINKING_LABELS: Record<AgentThinking, string> = {
 	off: "Off",
@@ -381,22 +502,18 @@ const ThinkingControl = memo(function ThinkingControl({
 				{THINKING_DESCRIPTIONS[thinking]}
 			</span>
 		</div>
-	) : "Not available for this model";
+	) : (
+		"Not available for this model"
+	);
 
 	return (
-		<Tooltip
-			content={tooltipContent}
-			delay={250}
-			side="top"
-		>
+		<Tooltip content={tooltipContent} delay={250} side="top">
 			<Button
 				aria-label={`Thinking effort: ${THINKING_LABELS[thinking]}. Click to cycle.`}
 				className={cn(
 					iconOnly ? "border-transparent" : "h-7 gap-1 border px-2 text-xs",
 					!iconOnly && compact && "h-7 px-1.5 text-[11px]",
-					isOn
-						? "border-0"
-						: "",
+					isOn ? "border-0" : "",
 					!(isOn || iconOnly) && "border-transparent hover:border-border/60"
 				)}
 				disabled={!supportsThinking}
@@ -408,11 +525,11 @@ const ThinkingControl = memo(function ThinkingControl({
 				{iconOnly ? null : (
 					<AnimatePresence initial={false} mode="popLayout">
 						<motion.span
-							key={thinking}
 							animate={{ filter: "blur(0px)", opacity: 1 }}
 							className="font-medium"
 							exit={{ filter: "blur(4px)", opacity: 0 }}
 							initial={{ filter: "blur(4px)", opacity: 0 }}
+							key={thinking}
 							transition={THINKING_LABEL_TRANSITION}
 						>
 							{THINKING_LABELS[thinking]}
@@ -467,13 +584,13 @@ const TierControl = memo(function TierControl() {
 			>
 				<DropdownMenu.Trigger
 					aria-label={`Model tier: ${TIER_LABELS[tier]}`}
-					className="inline-flex h-7 items-center gap-1 rounded border border-transparent bg-secondary px-2 font-medium text-xs text-foreground transition-all hover:border-border/60 hover:bg-interactive-hover"
+					className="inline-flex h-7 items-center gap-1 rounded border border-transparent bg-secondary px-2 font-medium text-foreground text-xs transition-all hover:border-border/60 hover:bg-interactive-hover"
 				>
 					<TierIcon className="size-3.5" tier={tier} />
 					{TIER_LABELS[tier]}
 					<CaretDownIcon
 						className={cn(
-							"size-3 -mt-px transition-transform duration-150 ease-out motion-reduce:transition-none",
+							"-mt-px size-3 transition-transform duration-150 ease-out motion-reduce:transition-none",
 							tierMenuOpen && "rotate-180"
 						)}
 					/>
@@ -482,20 +599,20 @@ const TierControl = memo(function TierControl() {
 			<DropdownMenu.Content align="start" className="w-52">
 				{AGENT_TIERS.map((optionTier) => (
 					<DropdownMenu.Item
+						className="h-10"
 						key={optionTier}
 						onClick={() => selectTier(optionTier)}
-						className="h-10"
 					>
 						<div className="flex min-w-0 items-start gap-2">
 							<TierIcon className="mt-0.5 size-4 shrink-0" tier={optionTier} />
 							<div className="flex min-w-0 flex-col">
-							<span className="font-medium text-xs">
-								{TIER_LABELS[optionTier]}
-								{tier === optionTier ? " (Current)" : ""}
-							</span>
-							<span className="text-muted-foreground text-[11px]">
-								{TIER_DESCRIPTIONS[optionTier]}
-							</span>
+								<span className="font-medium text-xs">
+									{TIER_LABELS[optionTier]}
+									{tier === optionTier ? " (Current)" : ""}
+								</span>
+								<span className="text-[11px] text-muted-foreground">
+									{TIER_DESCRIPTIONS[optionTier]}
+								</span>
 							</div>
 						</div>
 					</DropdownMenu.Item>
@@ -531,7 +648,7 @@ const KeyboardHints = memo(function KeyboardHints({
 		return <GeneratingHint />;
 	}
 	return (
-		<div className="hidden min-w-0 items-center gap-1 text-muted-foreground/60 text-[10px] sm:flex">
+		<div className="hidden min-w-0 items-center gap-1 text-[10px] text-muted-foreground/60 sm:flex">
 			<Kbd>↵</Kbd>
 			<span className="mr-1">send</span>
 			<Kbd>⇧↵</Kbd>
@@ -539,6 +656,41 @@ const KeyboardHints = memo(function KeyboardHints({
 		</div>
 	);
 });
+
+function MentionPills({
+	mentions,
+	onRemove,
+}: {
+	mentions: AgentMention[];
+	onRemove: (id: string) => void;
+}) {
+	return (
+		<div className="mb-2 flex flex-wrap items-center gap-1.5">
+			{mentions.map((mention) => (
+				<span
+					className="inline-flex items-center gap-1.5 rounded border border-border/60 bg-muted/40 py-1 pr-1 pl-2 text-xs"
+					key={mention.id}
+				>
+					{mention.domain ? (
+						<FaviconImage domain={mention.domain} size={14} />
+					) : null}
+					<span className="max-w-[12rem] truncate font-medium text-foreground/80">
+						{mention.label}
+					</span>
+					<Button
+						aria-label={`Remove ${mention.label}`}
+						className="size-5 shrink-0"
+						onClick={() => onRemove(mention.id)}
+						size="icon-sm"
+						variant="ghost"
+					>
+						<XMarkIcon className="size-3" />
+					</Button>
+				</span>
+			))}
+		</div>
+	);
+}
 
 function PendingPill({
 	messages,

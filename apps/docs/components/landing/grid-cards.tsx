@@ -72,7 +72,7 @@ export const GridCards = () => (
 			</p>
 		</div>
 
-		<div className="grid grid-cols-1 gap-6 sm:grid-cols-2 sm:gap-8 lg:grid-cols-3 lg:gap-10 xl:gap-12">
+		<div className="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-5 lg:grid-cols-3 lg:gap-6">
 			{cards.map((card) => (
 				<div className="flex" key={card.id}>
 					<SciFiGridCard

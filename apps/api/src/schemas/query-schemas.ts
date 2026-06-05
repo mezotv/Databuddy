@@ -1,5 +1,5 @@
 import { t } from "elysia";
-import { QueryBuilders } from "../query/builders";
+import { QueryBuilders } from "@databuddy/ai/query/builders";
 
 const QUERY_BUILDER_TYPES = Object.keys(QueryBuilders) as Array<
 	keyof typeof QueryBuilders

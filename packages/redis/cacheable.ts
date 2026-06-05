@@ -1,3 +1,11 @@
+import {
+	getCacheableTagIndexKey,
+	invalidateCacheablePattern,
+	invalidateCacheableTag,
+	invalidateCacheableTags,
+	invalidateCacheableWithArgs,
+	type CacheInvalidationResult,
+} from "./cache-invalidation";
 import { getRedisCache } from "./redis";
 
 const activeRevalidations = new Map<string, Promise<void>>();
@@ -25,12 +33,33 @@ function traceCache(prefix: string, hit: boolean, ms: number) {
 	}
 }
 
-interface CacheOptions {
+type CacheTagger<
+	T extends (...args: Parameters<T>) => Promise<Awaited<ReturnType<T>>>,
+> = (
+	result: Awaited<ReturnType<T>>,
+	...args: Parameters<T>
+) => Promise<string[]> | string[];
+
+interface CacheOptions<
+	T extends (...args: Parameters<T>) => Promise<Awaited<ReturnType<T>>>,
+> {
 	expireInSec: number;
 	prefix?: string;
 	staleTime?: number;
 	staleWhileRevalidate?: boolean;
+	tags?: CacheTagger<T>;
 }
+
+export type CacheableFunction<
+	T extends (...args: Parameters<T>) => Promise<Awaited<ReturnType<T>>>,
+> = ((...args: Parameters<T>) => Promise<Awaited<ReturnType<T>>>) & {
+	getKey: (...args: Parameters<T>) => string;
+	invalidate: (...args: Parameters<T>) => Promise<void>;
+	invalidatePrefix: () => Promise<number>;
+	invalidateTag: (tag: string) => Promise<number>;
+	invalidateTags: (tags: string[]) => Promise<CacheInvalidationResult>;
+	invalidateWithArgs: (knownArgs: unknown[]) => Promise<number>;
+};
 
 function deserialize(data: string): unknown {
 	return JSON.parse(data, (_, value) => {
@@ -63,7 +92,7 @@ function markRedisUnhealthy() {
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-	let timer: Timer;
+	let timer: ReturnType<typeof setTimeout>;
 	return Promise.race([
 		promise,
 		new Promise<never>((_, reject) => {
@@ -100,11 +129,75 @@ function stringify(obj: unknown): string {
 	return String(obj);
 }
 
-function triggerBackgroundRevalidation<T>(
+async function resolveCacheTags<
+	T extends (...args: Parameters<T>) => Promise<Awaited<ReturnType<T>>>,
+>(
+	tag: CacheTagger<T> | undefined,
+	result: Awaited<ReturnType<T>>,
+	args: Parameters<T>
+): Promise<string[]> {
+	if (!tag) {
+		return [];
+	}
+	const tags = await tag(result, ...args);
+	return [...new Set(tags.filter(Boolean))];
+}
+
+async function indexCacheKey(
+	prefix: string,
 	key: string,
-	fn: () => Promise<T>,
+	tags: string[],
+	expireInSec: number
+): Promise<void> {
+	if (tags.length === 0) {
+		return;
+	}
+	const redis = getRedisCache();
+	await Promise.all(
+		tags.map(async (tag) => {
+			const indexKey = getCacheableTagIndexKey(prefix, tag);
+			await withTimeout(redis.sadd(indexKey, key), REDIS_TIMEOUT_MS);
+			await withTimeout(redis.expire(indexKey, expireInSec), REDIS_TIMEOUT_MS);
+		})
+	);
+}
+
+async function writeCacheEntry<
+	T extends (...args: Parameters<T>) => Promise<Awaited<ReturnType<T>>>,
+>(
+	prefix: string,
+	key: string,
+	serialized: string,
+	result: Awaited<ReturnType<T>>,
+	args: Parameters<T>,
 	expireInSec: number,
-	staleTime: number
+	tags?: CacheTagger<T>
+): Promise<void> {
+	const resolvedTags = await resolveCacheTags(tags, result, args);
+	await withTimeout(
+		getRedisCache().setex(key, expireInSec, serialized),
+		REDIS_TIMEOUT_MS
+	);
+	try {
+		await indexCacheKey(prefix, key, resolvedTags, expireInSec);
+	} catch (error) {
+		await getRedisCache()
+			.del(key)
+			.catch(() => {});
+		throw error;
+	}
+}
+
+function triggerBackgroundRevalidation<
+	T extends (...args: Parameters<T>) => Promise<Awaited<ReturnType<T>>>,
+>(
+	key: string,
+	args: Parameters<T>,
+	fn: () => Promise<Awaited<ReturnType<T>>>,
+	expireInSec: number,
+	staleTime: number,
+	prefix: string,
+	tags?: CacheTagger<T>
 ) {
 	if (activeRevalidations.has(key)) {
 		return;
@@ -122,11 +215,20 @@ function triggerBackgroundRevalidation<T>(
 
 		const fresh = await fn();
 		if (fresh != null && redisAvailable) {
-			const serialized = JSON.stringify(fresh);
-			await withTimeout(
-				redis.setex(key, expireInSec, serialized),
-				REDIS_TIMEOUT_MS
-			).catch(() => {});
+			try {
+				const serialized = JSON.stringify(fresh);
+				await writeCacheEntry(
+					prefix,
+					key,
+					serialized,
+					fresh,
+					args,
+					expireInSec,
+					tags
+				).catch(() => {});
+			} catch {
+				// JSON.stringify failed
+			}
 		}
 	})()
 		.catch(() => {})
@@ -137,12 +239,13 @@ function triggerBackgroundRevalidation<T>(
 
 export function cacheable<
 	T extends (...args: Parameters<T>) => Promise<Awaited<ReturnType<T>>>,
->(fn: T, options: CacheOptions | number) {
+>(fn: T, options: CacheOptions<T> | number): CacheableFunction<T> {
 	const {
 		expireInSec,
 		prefix = fn.name,
 		staleWhileRevalidate = false,
 		staleTime = 0,
+		tags,
 	} = typeof options === "number" ? { expireInSec: options } : options;
 
 	const cachePrefix = `cacheable:${prefix}`;
@@ -186,9 +289,12 @@ export function cacheable<
 			if (staleWhileRevalidate && staleTime > 0) {
 				triggerBackgroundRevalidation(
 					key,
+					args,
 					() => fn(...args),
 					expireInSec,
-					staleTime
+					staleTime,
+					prefix,
+					tags
 				);
 			}
 
@@ -212,10 +318,14 @@ export function cacheable<
 			if (result != null && redisAvailable) {
 				try {
 					const serialized = JSON.stringify(result);
-					const redis = getRedisCache();
-					withTimeout(
-						redis.setex(key, expireInSec, serialized),
-						REDIS_TIMEOUT_MS
+					writeCacheEntry(
+						prefix,
+						key,
+						serialized,
+						result,
+						args,
+						expireInSec,
+						tags
 					).catch(() => markRedisUnhealthy());
 				} catch {
 					// JSON.stringify failed
@@ -234,5 +344,15 @@ export function cacheable<
 	};
 
 	cachedFn.getKey = getKey;
+	cachedFn.invalidate = async (...args: Parameters<T>) => {
+		await getRedisCache().del(getKey(...args));
+	};
+	cachedFn.invalidatePrefix = () =>
+		invalidateCacheablePattern(`${cachePrefix}:*`);
+	cachedFn.invalidateTag = (tag: string) => invalidateCacheableTag(prefix, tag);
+	cachedFn.invalidateTags = (cacheTags: string[]) =>
+		invalidateCacheableTags(prefix, cacheTags);
+	cachedFn.invalidateWithArgs = (knownArgs: unknown[]) =>
+		invalidateCacheableWithArgs(prefix, knownArgs);
 	return cachedFn;
 }

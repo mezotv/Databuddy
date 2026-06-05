@@ -14,7 +14,6 @@ import {
 	useState,
 } from "react";
 import { InsightCard } from "./insight-card";
-import { XIcon } from "@phosphor-icons/react/dist/ssr";
 import {
 	ArrowClockwiseIcon,
 	ArrowsDownUpIcon,
@@ -23,6 +22,7 @@ import {
 	FunnelIcon,
 	LightbulbIcon,
 	WarningCircleIcon,
+	XMarkIcon as XIcon,
 } from "@databuddy/ui/icons";
 import { Button, Card, GhostTriggerButton } from "@databuddy/ui";
 import { DropdownMenu } from "@databuddy/ui/client";
@@ -201,7 +201,7 @@ export function CockpitSignals(): ReactElement {
 	const visibleCount = filteredInsights.length;
 
 	return (
-		<Card aria-label="Signals">
+		<Card aria-label="Insight queue">
 			<Card.Header className="flex-row items-center justify-between gap-3">
 				<div className="flex items-center gap-2">
 					<LightbulbIcon
@@ -209,7 +209,7 @@ export function CockpitSignals(): ReactElement {
 						className="size-4 text-primary"
 						weight="duotone"
 					/>
-					<Card.Title className="text-sm">Signals</Card.Title>
+					<Card.Title className="text-sm">Insight queue</Card.Title>
 				</div>
 				{insights.length > 0 && (
 					<span className="text-muted-foreground text-xs tabular-nums">
@@ -335,7 +335,7 @@ export function CockpitSignals(): ReactElement {
 
 			{isLoading && (
 				<InsightsFetchStatusRow
-					description="Comparing week-over-week traffic, errors, and referrers"
+					description="Comparing organization-wide traffic, errors, referrers, and product events"
 					title="Loading insights…"
 					variant="initial"
 				/>
@@ -343,7 +343,7 @@ export function CockpitSignals(): ReactElement {
 
 			{!(isLoading || isError) && isRefreshing && (
 				<InsightsFetchStatusRow
-					description="Refreshing analysis from your data"
+					description="Refreshing organization-wide analysis"
 					title="Updating insights…"
 					variant="refresh"
 				/>
@@ -484,9 +484,9 @@ function AllHealthyState() {
 				<CheckCircleIcon className="size-5 text-emerald-500" weight="fill" />
 			</div>
 			<div className="space-y-1">
-				<p className="font-medium text-foreground">All systems healthy</p>
+				<p className="font-medium text-foreground">No priority insights</p>
 				<p className="text-pretty text-muted-foreground text-sm">
-					No actionable insights detected across your websites this week
+					No actionable signals detected for the selected window
 				</p>
 			</div>
 		</div>

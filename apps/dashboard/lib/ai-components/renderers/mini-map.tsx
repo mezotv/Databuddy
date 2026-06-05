@@ -1,16 +1,10 @@
 "use client";
 
-import type { LocationData } from "@databuddy/shared/types/website";
+import type { LocationData } from "@/types/website";
 import dynamic from "next/dynamic";
 import { motion } from "motion/react";
 import { useId, useMemo, useState } from "react";
 import { CountryFlag } from "@/components/icon";
-import {
-	chartLegendPillDotClassName,
-	chartLegendPillLabelClassName,
-	chartLegendPillRowClassName,
-	chartSeriesColorAtIndex,
-} from "@/lib/chart-presentation";
 import { formatNumber } from "@/lib/formatters";
 import { cn } from "@/lib/utils";
 import type { BaseComponentProps } from "../types";
@@ -145,7 +139,10 @@ export function MiniMapRenderer({ title, countries, className }: MiniMapProps) {
 
 				<div className="rounded-md">
 					<div className="dotted-bg overflow-hidden rounded-md">
-						<div className="relative rounded" style={{ minHeight: MAP_PLOT_HEIGHT }}>
+						<div
+							className="relative rounded"
+							style={{ minHeight: MAP_PLOT_HEIGHT }}
+						>
 							<div className="h-[280px] [&>div]:rounded [&>div]:border-0">
 								<MapComponent
 									height="100%"
@@ -253,7 +250,8 @@ export function MiniMapRenderer({ title, countries, className }: MiniMapProps) {
 
 				<div className="flex w-full items-center justify-start rounded-md bg-background px-2.5 py-2.5">
 					<p className="text-muted-foreground text-xs">
-						{countries.length} {countries.length === 1 ? "country" : "countries"}
+						{countries.length}{" "}
+						{countries.length === 1 ? "country" : "countries"}
 					</p>
 				</div>
 			</div>

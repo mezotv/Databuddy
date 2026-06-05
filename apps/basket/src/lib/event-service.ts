@@ -1,5 +1,4 @@
 import type {
-	AICallSpan,
 	AnalyticsEvent,
 	CustomOutgoingLink,
 	ErrorSpanRow,
@@ -118,9 +117,6 @@ export function buildTrackEvent(
 	};
 }
 
-/**
- * Insert a track event (pageview/analytics event) via Kafka
- */
 export function insertTrackEvent(
 	trackData: any,
 	clientId: string,
@@ -181,9 +177,6 @@ export function insertTrackEvent(
 	});
 }
 
-/**
- * Insert an outgoing link click event into the database
- */
 export function insertOutgoingLink(
 	linkData: any,
 	clientId: string,
@@ -247,9 +240,6 @@ export function insertTrackEventsBatch(
 	});
 }
 
-/**
- * Insert lean error spans (v2.x format)
- */
 export function insertErrorSpans(
 	errors: ErrorSpan[],
 	clientId: string
@@ -295,10 +285,6 @@ export function insertErrorSpans(
 	});
 }
 
-/**
- * Insert individual vital metrics (v2.x format) as spans
- * Each metric is stored as a separate row - no aggregation
- */
 export function insertIndividualVitals(
 	vitals: IndividualVital[],
 	clientId: string
@@ -342,83 +328,6 @@ export function insertOutgoingLinksBatch(
 	});
 }
 
-/**
- * Insert AI call spans
- * owner_id: The org or user ID that owns this data (from API key)
- */
-export function insertAICallSpans(
-	calls: Array<{
-		owner_id: string;
-		timestamp: number;
-		type: "generate" | "stream";
-		model: string;
-		provider: string;
-		finish_reason?: string;
-		input_tokens: number;
-		output_tokens: number;
-		total_tokens: number;
-		cached_input_tokens?: number;
-		cache_creation_input_tokens?: number;
-		reasoning_tokens?: number;
-		web_search_count?: number;
-		input_token_cost_usd?: number;
-		output_token_cost_usd?: number;
-		total_token_cost_usd?: number;
-		tool_call_count: number;
-		tool_result_count: number;
-		tool_call_names: string[];
-		duration_ms: number;
-		trace_id?: string;
-		http_status?: number;
-		error_name?: string;
-		error_message?: string;
-		error_stack?: string;
-	}>
-): Promise<void> {
-	return record("insertAICallSpans", async () => {
-		if (calls.length === 0) {
-			return;
-		}
-
-		const spans: AICallSpan[] = calls.map((call) => ({
-			owner_id: call.owner_id,
-			timestamp: call.timestamp,
-			type: call.type,
-			model: call.model,
-			provider: call.provider,
-			finish_reason: call.finish_reason,
-			input_tokens: call.input_tokens,
-			output_tokens: call.output_tokens,
-			total_tokens: call.total_tokens,
-			cached_input_tokens: call.cached_input_tokens,
-			cache_creation_input_tokens: call.cache_creation_input_tokens,
-			reasoning_tokens: call.reasoning_tokens,
-			web_search_count: call.web_search_count,
-			input_token_cost_usd: call.input_token_cost_usd,
-			output_token_cost_usd: call.output_token_cost_usd,
-			total_token_cost_usd: call.total_token_cost_usd,
-			tool_call_count: call.tool_call_count,
-			tool_result_count: call.tool_result_count,
-			tool_call_names: call.tool_call_names,
-			duration_ms: call.duration_ms,
-			trace_id: call.trace_id,
-			http_status: call.http_status,
-			error_name: call.error_name,
-			error_message: call.error_message,
-			error_stack: call.error_stack,
-		}));
-
-		await runPromise(sendBatch("analytics-ai-call-spans", spans));
-	});
-}
-
-/**
- * Insert organization-scoped custom events
- * owner_id: The org or user ID that owns this data (from API key)
- * website_id: Optional website scope
- * namespace: Optional logical grouping (e.g., 'billing', 'auth', 'api')
- * source: Optional origin identifier (e.g., 'backend', 'webhook', 'cli')
- */
 export function insertCustomEvents(
 	events: Array<{
 		owner_id: string;

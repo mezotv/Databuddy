@@ -19,9 +19,38 @@ import {
 	getOrganizationOwnerId,
 } from "./utils/billing";
 
-interface PreResolvedAuth {
+export interface PreResolvedAuth {
 	apiKey: ApiKeyRow | null;
 	session: Awaited<ReturnType<typeof auth.api.getSession>> | null;
+}
+
+export function createServiceAuth(
+	organizationId: string,
+	scopes: string[]
+): PreResolvedAuth {
+	const now = new Date();
+	const apiKey: ApiKeyRow = {
+		id: `svc:${organizationId}`,
+		name: "Internal Service",
+		prefix: "svc",
+		start: "svc_int_",
+		keyHash: `svc:${organizationId}`,
+		organizationId,
+		userId: null,
+		type: "automation",
+		scopes,
+		enabled: true,
+		revokedAt: null,
+		rateLimitEnabled: false,
+		rateLimitTimeWindow: null,
+		rateLimitMax: null,
+		expiresAt: null,
+		lastUsedAt: null,
+		metadata: {},
+		createdAt: now,
+		updatedAt: now,
+	};
+	return { session: null, apiKey };
 }
 
 export const createRPCContext = async (

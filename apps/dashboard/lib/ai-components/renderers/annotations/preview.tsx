@@ -1,7 +1,6 @@
 "use client";
 
-import type { Icon } from "@phosphor-icons/react";
-import { useState } from "react";
+import { type ComponentType, type SVGProps, useState } from "react";
 import { useChat } from "@/contexts/chat-context";
 import { cn } from "@/lib/utils";
 import type { BaseComponentProps } from "../../types";
@@ -13,6 +12,10 @@ import {
 	TrashIcon,
 } from "@databuddy/ui/icons";
 import { Badge, Button, Card } from "@databuddy/ui";
+
+type IconComponent = ComponentType<
+	SVGProps<SVGSVGElement> & { size?: number | string; weight?: string }
+>;
 
 interface AnnotationPreviewData {
 	annotationType: "point" | "line" | "range";
@@ -31,7 +34,7 @@ export interface AnnotationPreviewProps extends BaseComponentProps {
 
 interface ModeConfig {
 	accent: string;
-	ButtonIcon: Icon;
+	ButtonIcon: IconComponent;
 	confirmLabel: string;
 	confirmMessage: string;
 	title: string;
@@ -149,7 +152,7 @@ export function AnnotationPreviewRenderer({
 						{Array.isArray(annotation.tags) && annotation.tags.length > 0 && (
 							<div>
 								<p className="mb-1.5 text-muted-foreground text-xs">Tags</p>
-								<div className="flex items-center flex-wrap gap-1">
+								<div className="flex flex-wrap items-center gap-1">
 									{annotation.tags.map((tag) => (
 										<div
 											className="flex items-center gap-2 rounded-md bg-muted px-2 py-1.5 hover:bg-interactive-hover"

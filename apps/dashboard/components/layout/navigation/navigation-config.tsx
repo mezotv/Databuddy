@@ -17,12 +17,16 @@ import {
 	GlobeSimpleIcon,
 	HeartPulseIcon as HeartbeatIcon,
 	HouseIcon,
+	IdBadgeIcon,
 	IdBadge2Icon as IdentificationBadgeIcon,
+	KeyIcon,
 	LightbulbIcon,
 	BoltLightningIcon as LightningIcon,
 	LinkIcon,
+	ListBulletsIcon,
 	LockIcon,
 	MapPinIcon,
+	PlugIcon,
 	ChartActivityIcon as PulseIcon,
 	ReceiptIcon,
 	RobotIcon,
@@ -55,20 +59,48 @@ export const mainNavigation: NavigationGroup[] = [
 			createNavItem("Home", HouseIcon, "/home"),
 			createNavItem("Websites", GlobeIcon, "/websites"),
 			createNavItem("Insights", LightbulbIcon, "/insights"),
+			createNavItem("Databunny", RobotIcon, "/agent", {
+				activeMatch: "prefix",
+				alpha: true,
+			}),
 		],
 	},
 	{
 		label: "Tracking",
 		items: [
-			createNavItem("Links", LinkIcon, "/links", { tag: "BETA" }),
-			createNavItem("Events", LightningIcon, "/events"),
+			createNavItem("Links", LinkIcon, "/links", {
+				activeMatch: "prefix",
+				tag: "BETA",
+			}),
+			createNavItem("Events", LightningIcon, "/events", {
+				activeMatch: "prefix",
+				searchItems: [
+					{
+						name: "Events Stream",
+						href: "/events/stream",
+						icon: ListBulletsIcon,
+						searchTags: ["custom events", "global events", "event log"],
+					},
+				],
+				searchTags: [
+					"custom events",
+					"global events",
+					"unattached events",
+					"event analytics",
+				],
+			}),
 		],
 	},
 	{
 		label: "Monitoring",
 		items: [
-			createNavItem("Monitors", HeartbeatIcon, "/monitors", { tag: "BETA" }),
+			createNavItem("Monitors", HeartbeatIcon, "/monitors", {
+				activeMatch: "prefix",
+				tag: "BETA",
+			}),
 			createNavItem("Status Pages", GlobeSimpleIcon, "/monitors/status-pages", {
+				activeMatch: "prefix",
+				hideFromSidebar: true,
 				tag: "BETA",
 			}),
 		],
@@ -128,6 +160,21 @@ export const websiteNavigation: NavigationGroup[] = [
 		items: [
 			createNavItem("Events", LightningIcon, "/events", {
 				rootLevel: false,
+				searchItems: [
+					{
+						name: "Events Stream",
+						href: "/events/stream",
+						icon: ListBulletsIcon,
+						searchTags: ["custom events", "website events", "event log"],
+					},
+				],
+				searchTags: [
+					"custom events",
+					"website events",
+					"site events",
+					"attached events",
+					"event analytics",
+				],
 			}),
 			createNavItem("Users", IdentificationBadgeIcon, "/users", {
 				rootLevel: false,
@@ -180,6 +227,14 @@ export const websiteNavigation: NavigationGroup[] = [
 			}),
 			createNavItem("Setup", CodeIcon, "/settings/tracking", {
 				rootLevel: false,
+				searchTags: [
+					"tracking setup",
+					"install script",
+					"script tag",
+					"react sdk",
+					"vue sdk",
+					"analytics sdk",
+				],
 			}),
 		],
 	},
@@ -190,7 +245,47 @@ export const settingsNavigation: NavigationGroup[] = [
 		back: { href: "/home", label: "Home" },
 		label: "Organization",
 		items: [
-			createNavItem("General", GearIcon, "/organizations/settings"),
+			createNavItem("General", GearIcon, "/organizations/settings", {
+				searchItems: [
+					{
+						name: "Organization Details",
+						href: "#details",
+						icon: IdBadgeIcon,
+						searchTags: ["workspace details", "organization id", "slug"],
+					},
+					{
+						name: "Workspace Websites",
+						href: "#websites",
+						icon: GlobeIcon,
+						searchTags: ["organization websites", "workspace sites"],
+					},
+					{
+						name: "API Keys",
+						href: "#api-keys",
+						icon: KeyIcon,
+						searchTags: [
+							"api key",
+							"api token",
+							"access token",
+							"server sdk",
+							"node sdk",
+							"automation key",
+							"sdk key",
+						],
+					},
+				],
+				searchTags: [
+					"organization settings",
+					"workspace settings",
+					"general settings",
+				],
+			}),
+			createNavItem(
+				"Integrations",
+				PlugIcon,
+				"/organizations/settings/integrations",
+				{ flag: "integrations" }
+			),
 			createNavItem("Members", UserIcon, "/organizations/members"),
 			createNavItem("Billing", CreditCardIcon, "/billing"),
 			createNavItem("Plans", CurrencyDollarIcon, "/billing/plans"),

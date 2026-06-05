@@ -2,7 +2,11 @@
 
 import { useCallback, useState } from "react";
 import { cn } from "@/lib/utils";
-import { ArrowClockwiseIcon, WarningIcon, XMarkIcon } from "@databuddy/ui/icons";
+import {
+	ArrowClockwiseIcon,
+	WarningIcon,
+	XMarkIcon,
+} from "@databuddy/ui/icons";
 import { Button } from "@databuddy/ui";
 
 function displayMessageForError(error: Error | undefined): string {

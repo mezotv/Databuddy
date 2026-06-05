@@ -60,7 +60,9 @@ export function LinksTableDemo() {
 						<img
 							alt={link.country}
 							className="h-3 w-5 shrink-0 rounded-[2px] object-cover"
+							height={12}
 							src={`https://flagcdn.com/40x30/${link.country}.png`}
+							width={20}
 						/>
 						<div className="min-w-0 flex-1">
 							<span className="font-mono text-foreground text-xs">
@@ -314,7 +316,13 @@ export function DeepLinkDemo() {
 						onClick={() => setActiveIdx(i)}
 						type="button"
 					>
-						<img alt={dl.app} className="size-4 invert" src={dl.icon} />
+						<img
+							alt={dl.app}
+							className="size-4 invert"
+							height={16}
+							src={dl.icon}
+							width={16}
+						/>
 					</button>
 				))}
 			</div>

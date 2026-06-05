@@ -1,5 +1,5 @@
 import { SITE_URL } from "@/app/util/constants";
-import { getPosts } from "@/lib/blog-query";
+import { getPosts, isPublished } from "@/lib/blog-query";
 import { getAllCompetitorSlugs } from "@/lib/comparison-config";
 import { source } from "@/lib/source";
 import type { MetadataRoute } from "next";
@@ -202,7 +202,7 @@ export async function generateSitemapEntries(): Promise<MetadataRoute.Sitemap> {
 		// Add blog posts and blog index
 		const blogData = await getPosts();
 		if (!("error" in blogData) && blogData?.posts) {
-			const blogEntries = blogData.posts.map((post) => ({
+			const blogEntries = blogData.posts.filter(isPublished).map((post) => ({
 				url: `${SITE_URL}/blog/${post.slug}`,
 				lastModified: new Date(post.publishedAt),
 				changeFrequency: "monthly" as const,

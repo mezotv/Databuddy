@@ -5,12 +5,13 @@ import { anomaliesRouter } from "./routers/anomalies";
 import { apikeysRouter } from "./routers/apikeys";
 import { autocompleteRouter } from "./routers/autocomplete";
 import { billingRouter } from "./routers/billing";
-import { featureInviteRouter } from "./routers/feature-invite";
 import { feedbackRouter } from "./routers/feedback";
 import { flagsRouter } from "./routers/flags";
 import { funnelsRouter } from "./routers/funnels";
 import { goalsRouter } from "./routers/goals";
+import { insightGenerationRouter } from "./routers/insight-generation";
 import { insightsRouter } from "./routers/insights";
+import { integrationsRouter } from "./routers/integrations";
 import { linkFoldersRouter } from "./routers/link-folders";
 import { linksRouter } from "./routers/links";
 import { organizationsRouter } from "./routers/organizations";
@@ -33,9 +34,10 @@ export const appRouter = {
 	goals: goalsRouter,
 	autocomplete: autocompleteRouter,
 	apikeys: apikeysRouter,
-	featureInvite: featureInviteRouter,
+	integrations: integrationsRouter,
 	feedback: feedbackRouter,
 	flags: flagsRouter,
+	insightGeneration: insightGenerationRouter,
 	insights: insightsRouter,
 	targetGroups: targetGroupsRouter,
 	organizations: organizationsRouter,

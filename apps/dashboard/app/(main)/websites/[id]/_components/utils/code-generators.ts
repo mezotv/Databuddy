@@ -2,9 +2,9 @@ import { ACTUAL_LIBRARY_DEFAULTS } from "./tracking-defaults";
 import type { TrackingOptions } from "./types";
 
 export interface VersionedScript {
-	version: number;
 	filename: string;
 	sriHash: string;
+	version: number;
 }
 
 export function generateScriptTag(
@@ -98,16 +98,41 @@ function AppLayout({ children }) {
 }`;
 }
 
+export function generateNodeCode(websiteId: string): string {
+	return `import { Databuddy } from '@databuddy/sdk/node';
+
+const analytics = new Databuddy({
+  apiKey: process.env.DATABUDDY_API_KEY!,
+  websiteId: '${websiteId}',
+  enableBatching: true,
+});
+
+await analytics.track({
+  name: 'user_signup',
+  properties: {
+    plan: 'pro',
+    source: 'api',
+  },
+});
+
+// Important in serverless/background jobs
+await analytics.flush();`;
+}
+
 export function generateVueCode(
 	websiteId: string,
-	trackingOptions: TrackingOptions,
+	trackingOptions: TrackingOptions
 ): string {
 	const meaningfulProps = Object.entries(trackingOptions)
 		.filter(([key, value]) => {
 			const actualDefault =
 				ACTUAL_LIBRARY_DEFAULTS[key as keyof TrackingOptions];
-			if (value === actualDefault) return false;
-			if (typeof value === "boolean" && !value && !actualDefault) return false;
+			if (value === actualDefault) {
+				return false;
+			}
+			if (typeof value === "boolean" && !value && !actualDefault) {
+				return false;
+			}
 			return true;
 		})
 		.map(([key, value]) => {

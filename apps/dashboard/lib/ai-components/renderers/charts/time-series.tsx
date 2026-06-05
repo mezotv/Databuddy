@@ -7,7 +7,6 @@ import {
 	chartAxisTickDefault,
 	chartAxisYWidthCompact,
 	chartCartesianGridDefault,
-	chartLegendPillClassName,
 	chartLegendPillDotClassName,
 	chartLegendPillLabelClassName,
 	chartLegendPillRowClassName,
@@ -19,7 +18,7 @@ import { formatNumber } from "@/lib/formatters";
 import { cn } from "@/lib/utils";
 import type { ChartComponentProps } from "../../types";
 import { ChartLineIcon } from "@databuddy/ui/icons";
-import { Badge, Card, Skeleton } from "@databuddy/ui";
+import { Card, Skeleton } from "@databuddy/ui";
 
 const {
 	Area,
@@ -42,7 +41,7 @@ export interface TimeSeriesProps extends ChartComponentProps {
 }
 
 const PLOT_HEIGHT = 200;
-const VARIANT_LABEL: Record<TimeSeriesProps["variant"], string> = {
+const _VARIANT_LABEL: Record<TimeSeriesProps["variant"], string> = {
 	line: "Line",
 	bar: "Bar",
 	area: "Area",
@@ -65,7 +64,6 @@ export function TimeSeriesRenderer({
 	data,
 	series,
 	className,
-	streaming,
 }: TimeSeriesProps) {
 	const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(new Set());
 
@@ -236,7 +234,12 @@ export function TimeSeriesRenderer({
 	};
 
 	return (
-		<Card className={cn("gap-0 overflow-hidden border-0 bg-secondary p-1", className)}>
+		<Card
+			className={cn(
+				"gap-0 overflow-hidden border-0 bg-secondary p-1",
+				className
+			)}
+		>
 			<div className="flex flex-col gap-1">
 				<div className="flex items-center gap-2.5 rounded-md bg-background px-2.5 py-2">
 					<div className="flex size-6 items-center justify-center rounded bg-accent">
@@ -248,30 +251,38 @@ export function TimeSeriesRenderer({
 					<p className="min-w-0 flex-1 truncate font-medium text-sm">
 						{title ?? "Time Series"}
 					</p>
-					<div className={cn("ml-auto min-w-0 flex-1 flex-wrap", chartLegendPillRowClassName)}>
-							{series.map((key) => {
-								const color = chartSeriesColorAtIndex(series.indexOf(key));
-								const hidden = hiddenSeries.has(key);
-								return (
-									<button
-										className={cn("flex items-center gap-1.5 rounded-md bg-secondary px-2 py-1", hidden && "opacity-40")}
-										key={key}
-										onClick={() => toggleSeries(key)}
-										type="button"
-									>
-										<div
-											className={chartLegendPillDotClassName}
-											style={{
-												backgroundColor: hidden
-													? "var(--muted-foreground)"
-													: color,
-											}}
-										/>
-										<span className={chartLegendPillLabelClassName}>{key}</span>
-									</button>
-								);
-							})}
-						</div>
+					<div
+						className={cn(
+							"ml-auto min-w-0 flex-1 flex-wrap",
+							chartLegendPillRowClassName
+						)}
+					>
+						{series.map((key) => {
+							const color = chartSeriesColorAtIndex(series.indexOf(key));
+							const hidden = hiddenSeries.has(key);
+							return (
+								<button
+									className={cn(
+										"flex items-center gap-1.5 rounded-md bg-secondary px-2 py-1",
+										hidden && "opacity-40"
+									)}
+									key={key}
+									onClick={() => toggleSeries(key)}
+									type="button"
+								>
+									<div
+										className={chartLegendPillDotClassName}
+										style={{
+											backgroundColor: hidden
+												? "var(--muted-foreground)"
+												: color,
+										}}
+									/>
+									<span className={chartLegendPillLabelClassName}>{key}</span>
+								</button>
+							);
+						})}
+					</div>
 				</div>
 
 				<div className="rounded-md bg-background px-3 py-3">
@@ -279,7 +290,9 @@ export function TimeSeriesRenderer({
 						{isSkeleton ? (
 							<Skeleton className="h-[200px] w-full rounded-none" />
 						) : (
-							<ChartErrorBoundary fallbackClassName={`h-[${PLOT_HEIGHT}px] w-full`}>
+							<ChartErrorBoundary
+								fallbackClassName={`h-[${PLOT_HEIGHT}px] w-full`}
+							>
 								<ResponsiveContainer height={PLOT_HEIGHT} width="100%">
 									{renderChart()}
 								</ResponsiveContainer>

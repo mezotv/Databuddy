@@ -34,7 +34,6 @@ import {
 } from "@/components/ui/table";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { cn } from "@/lib/utils";
-import { XIcon } from "@phosphor-icons/react/dist/ssr";
 import {
 	BracketsSquareIcon,
 	CopyIcon,
@@ -43,6 +42,7 @@ import {
 	LinkIcon,
 	MagnifyingGlassIcon,
 	TagIcon,
+	XMarkIcon as XIcon,
 } from "@databuddy/ui/icons";
 import {
 	Badge,

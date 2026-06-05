@@ -8,8 +8,11 @@ import { toast } from "sonner";
 import { z } from "zod";
 import { useOrganizationsContext } from "@/components/providers/organizations-provider";
 import { useOrganizationInvitations } from "@/hooks/use-organization-invitations";
-import { CaretUpDown } from "@phosphor-icons/react/dist/ssr";
-import { EnvelopeSimpleIcon, UsersIcon } from "@databuddy/ui/icons";
+import {
+	CaretUpDownIcon as CaretUpDown,
+	EnvelopeSimpleIcon,
+	UsersIcon,
+} from "@databuddy/ui/icons";
 import { Badge, Button, Field, Input } from "@databuddy/ui";
 import { DropdownMenu } from "@databuddy/ui/client";
 

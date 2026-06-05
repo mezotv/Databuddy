@@ -1,6 +1,6 @@
 "use client";
 
-import { XLogoIcon } from "@phosphor-icons/react";
+import { XMarkIcon as XLogoIcon } from "@databuddy/ui/icons";
 import Link from "next/link";
 import type { ReactElement } from "react";
 import {

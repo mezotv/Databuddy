@@ -1,8 +1,12 @@
 import { cn } from "@/lib/utils";
 import type { ErrorSummary } from "./types";
-import { ActivityIcon } from "@phosphor-icons/react/dist/ssr";
+import {
+	ChartActivityIcon as ActivityIcon,
+	TrendUpIcon,
+	UsersIcon,
+	WarningCircleIcon,
+} from "@databuddy/ui/icons";
 import type { NavIcon } from "@/components/layout/navigation/types";
-import { TrendUpIcon, UsersIcon, WarningCircleIcon } from "@databuddy/ui/icons";
 import { Card, Skeleton } from "@databuddy/ui";
 
 type StatVariant = "default" | "destructive" | "warning";

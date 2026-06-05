@@ -2,8 +2,8 @@
 
 import { getTrackingParams } from "@databuddy/sdk";
 import Link from "next/link";
-import { FaDiscord, FaGithub, FaXTwitter } from "react-icons/fa6";
-import { IoMdMail } from "react-icons/io";
+import { SiDiscord, SiGithub, SiX } from "@icons-pack/react-simple-icons";
+import { EnvelopeIcon } from "@databuddy/ui/icons";
 import { SciFiButton } from "./landing/scifi-btn";
 
 export function DocsFooter() {
@@ -156,7 +156,7 @@ export function DocsFooter() {
 									className="group flex items-center gap-3 text-muted-foreground hover:text-foreground"
 									href="mailto:support@databuddy.cc"
 								>
-									<IoMdMail className="size-5 shrink-0" />
+									<EnvelopeIcon className="size-5 shrink-0" />
 									support@databuddy.cc
 								</Link>
 							</li>
@@ -167,7 +167,7 @@ export function DocsFooter() {
 									rel="noopener"
 									target="_blank"
 								>
-									<FaDiscord className="size-5" />
+									<SiDiscord className="size-5" />
 									Discord
 								</Link>
 							</li>
@@ -178,7 +178,7 @@ export function DocsFooter() {
 									rel="noopener"
 									target="_blank"
 								>
-									<FaGithub className="size-5" />
+									<SiGithub className="size-5" />
 									GitHub
 								</Link>
 							</li>
@@ -189,7 +189,7 @@ export function DocsFooter() {
 									rel="noopener"
 									target="_blank"
 								>
-									<FaXTwitter className="size-5" />X
+									<SiX className="size-5" />X
 								</Link>
 							</li>
 						</ul>

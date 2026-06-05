@@ -20,16 +20,16 @@ import Section from "@/components/landing/section";
 import { StructuredData } from "@/components/structured-data";
 
 export const metadata: Metadata = {
-	title: "Databunny: AI Analytics Agent",
+	title: "AI Analytics Agent - Ask Your Data Questions in Plain English",
 	description:
-		"Ask questions about your data in plain English. Databunny is your AI analytics agent with automated insights, anomaly detection, and proactive alerts built into your dashboard.",
+		"Ask questions about your analytics in plain English. Databunny is your AI agent with natural language queries, automated insights, anomaly detection, and proactive alerts.",
 	alternates: {
 		canonical: "https://www.databuddy.cc/databunny",
 	},
 	openGraph: {
-		title: "Databunny: AI Analytics Agent",
+		title: "AI Analytics Agent - Ask Your Data Questions in Plain English",
 		description:
-			"Ask questions about your data in plain English. Databunny is your AI analytics agent with automated insights, anomaly detection, and proactive alerts built into your dashboard.",
+			"Ask questions about your analytics in plain English. Databunny is your AI agent with natural language queries, automated insights, anomaly detection, and proactive alerts.",
 		url: "https://www.databuddy.cc/databunny",
 		images: ["/og-image.png"],
 	},
@@ -71,17 +71,18 @@ export default function DatabunnyPage() {
 			<StructuredData
 				elements={[{ type: "faq", items: [...FAQ_ITEMS] }]}
 				page={{
-					title: "Databunny: AI Analytics Agent",
+					title:
+						"AI Analytics Agent - Ask Your Data Questions in Plain English",
 					description:
-						"Ask questions about your data in plain English. Automated insights, anomaly detection, and proactive alerts.",
+						"Ask questions about your analytics in plain English. Natural language queries, automated insights, anomaly detection, and proactive alerts.",
 					url: "https://www.databuddy.cc/databunny",
 				}}
 			/>
 			<div className="overflow-x-hidden">
 				<FeatureHero
 					docsHref="/docs"
-					subtitle="Ask questions in plain English, get answers backed by real data. Databunny watches your analytics around the clock, surfacing insights, catching anomalies, and alerting you before problems grow."
-					title="Your data, explained."
+					subtitle="Type a question. Get a chart, a number, or an insight backed by real data. Databunny watches your metrics around the clock and surfaces what matters before you think to ask."
+					title="Ask your analytics anything in plain English."
 				/>
 
 				<Section className="border-border border-b" id="agent">
@@ -158,7 +159,7 @@ export default function DatabunnyPage() {
 
 				<Section className="border-border border-b" id="faq">
 					<div className={container}>
-						<FaqSection eyebrow="FAQ" items={[...FAQ_ITEMS]} />
+						<FaqSection items={[...FAQ_ITEMS]} />
 					</div>
 				</Section>
 

@@ -14,15 +14,16 @@ const trackerVersionSchema = z.object({
 export const trackerRouter = {
 	getCurrentVersions: publicProcedure
 		.route({
-			description: "Returns the current tracker script versions with SRI hashes.",
+			description:
+				"Returns the current tracker script versions with SRI hashes.",
 			method: "POST",
 			path: "/tracker/getCurrentVersions",
 			summary: "Get current tracker versions",
 			tags: ["Tracker"],
 		})
 		.output(z.array(trackerVersionSchema))
-		.handler(async ({ context }) => {
-			return context.db
+		.handler(async ({ context }) =>
+			context.db
 				.select({
 					version: trackerVersions.version,
 					filename: trackerVersions.filename,
@@ -31,8 +32,8 @@ export const trackerRouter = {
 					deployedAt: trackerVersions.deployedAt,
 				})
 				.from(trackerVersions)
-				.where(eq(trackerVersions.isCurrent, true));
-		}),
+				.where(eq(trackerVersions.isCurrent, true))
+		),
 
 	listVersions: publicProcedure
 		.route({
@@ -48,8 +49,8 @@ export const trackerRouter = {
 			})
 		)
 		.output(z.array(trackerVersionSchema))
-		.handler(async ({ context, input }) => {
-			return context.db
+		.handler(async ({ context, input }) =>
+			context.db
 				.select({
 					version: trackerVersions.version,
 					filename: trackerVersions.filename,
@@ -59,6 +60,6 @@ export const trackerRouter = {
 				})
 				.from(trackerVersions)
 				.where(eq(trackerVersions.filename, input.filename))
-				.orderBy(desc(trackerVersions.version));
-		}),
+				.orderBy(desc(trackerVersions.version))
+		),
 };

@@ -1,6 +1,6 @@
 import "@databuddy/test/env";
 
-import { describe, it, expect, beforeEach, afterAll } from "bun:test";
+import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { createProcedureClient } from "@orpc/server";
 import { appRouter, type Context } from "@databuddy/rpc";
 import {

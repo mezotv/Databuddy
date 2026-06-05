@@ -12,14 +12,14 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import { useDateFilters } from "@/hooks/use-date-filters";
-import { getDeviceIcon } from "@/lib/utils";
+import { getDeviceIcon } from "@/components/device-icon";
 import { dynamicQueryFiltersAtom } from "@/stores/jotai/filterAtoms";
 import type { DynamicQueryFilter } from "@/stores/jotai/filterAtoms";
 import {
 	getCountryCode,
 	getCountryName,
 } from "@databuddy/shared/country-codes";
-import type { ProfileData } from "@databuddy/shared/types/analytics";
+import type { ProfileData } from "@/types/analytics";
 import {
 	ArrowDownIcon,
 	ArrowUpIcon,

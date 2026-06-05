@@ -4591,3 +4591,137 @@ export const MediaStopIcon = React.forwardRef<SVGSVGElement, NucleoIconProps>(
 	)
 );
 MediaStopIcon.displayName = "MediaStopIcon";
+
+export const QrCodeIcon = React.forwardRef<SVGSVGElement, NucleoIconProps>(
+	(props, ref) => (
+		<NucleoIcon ref={ref} {...props}>
+		<path
+			d="M2 11.25C2 10.2839 2.78334 9.5 3.75 9.5H6.75C7.71666 9.5 8.5 10.2839 8.5 11.25V14.25C8.5 15.2161 7.71666 16 6.75 16H3.75C2.78334 16 2 15.2161 2 14.25V11.25Z"
+			fillRule="evenodd"
+			clipRule="evenodd"
+			data-color="color-2"
+			fill="currentColor"
+			opacity="0.4"
+		/>
+		<path
+			d="M2 3.75C2 2.78393 2.78334 2 3.75 2H6.75C7.71666 2 8.5 2.78393 8.5 3.75V6.75C8.5 7.71607 7.71666 8.5 6.75 8.5H3.75C2.78334 8.5 2 7.71607 2 6.75V3.75Z"
+			fillRule="evenodd"
+			clipRule="evenodd"
+			data-color="color-2"
+			fill="currentColor"
+			opacity="0.4"
+		/>
+		<path
+			d="M9.5 3.75C9.5 2.78393 10.2833 2 11.25 2H14.25C15.2167 2 16 2.78393 16 3.75V6.75C16 7.71607 15.2167 8.5 14.25 8.5H11.25C10.2833 8.5 9.5 7.71607 9.5 6.75V3.75Z"
+			fillRule="evenodd"
+			clipRule="evenodd"
+			data-color="color-2"
+			fill="currentColor"
+			opacity="0.4"
+		/>
+		<path
+			d="M6.5 11.5L4 11.5V14H6.5V11.5Z"
+			fill="currentColor"
+		/>
+		<path
+			d="M6.5 4L4 4V6.5H6.5V4Z"
+			fill="currentColor"
+		/>
+		<path
+			d="M14 4L11.5 4V6.5H14V4Z"
+			fill="currentColor"
+		/>
+		<path
+			d="M16 14.5H14.5V16H16V14.5Z"
+			fill="currentColor"
+		/>
+		<path
+			d="M14.5 13H13V14.5H14.5V13Z"
+			fill="currentColor"
+		/>
+		<path
+			d="M16 11.5H14.5V13H16V11.5Z"
+			fill="currentColor"
+		/>
+		<path
+			d="M13 14.5H11V16H13V14.5Z"
+			fill="currentColor"
+		/>
+		<path
+			d="M11 11.5H9.5V14.5H11V11.5Z"
+			fill="currentColor"
+		/>
+		<path
+			d="M14.5 10H11V11.5H14.5V10Z"
+			fill="currentColor"
+		/>
+		</NucleoIcon>
+	)
+);
+QrCodeIcon.displayName = "QrCodeIcon";
+
+export const FolderSimpleIcon = React.forwardRef<SVGSVGElement, NucleoIconProps>(
+	(props, ref) => (
+		<NucleoIcon ref={ref} {...props}>
+		<path
+			d="M1.5 6.5H16.5V13.25C16.5 14.7692 15.2692 16 13.75 16H4.25C2.73079 16 1.5 14.7692 1.5 13.25V6.5Z"
+			data-color="color-2"
+			fill="currentColor"
+			opacity="0.4"
+		/>
+		<path
+			d="M4.25 2C2.73079 2 1.5 3.23079 1.5 4.75V6.5H16.5V6.25C16.5 4.73079 15.2692 3.5 13.75 3.5H8.72395L8.34569 3.02827C7.82347 2.37825 7.03552 2 6.201 2H4.25Z"
+			fill="currentColor"
+		/>
+		</NucleoIcon>
+	)
+);
+FolderSimpleIcon.displayName = "FolderSimpleIcon";
+
+export const DotsNineIcon = React.forwardRef<SVGSVGElement, NucleoIconProps>(
+	(props, ref) => (
+		<NucleoIcon ref={ref} {...props}>
+		<path
+			d="M9.00012 4C9.55241 4 10.0001 3.55228 10.0001 3C10.0001 2.44772 9.55241 2 9.00012 2C8.44784 2 8.00012 2.44772 8.00012 3C8.00012 3.55228 8.44784 4 9.00012 4Z"
+			data-color="color-2"
+			fill="currentColor"
+		/>
+		<path
+			d="M3.00012 10C3.55241 10 4.00012 9.55228 4.00012 9C4.00012 8.44772 3.55241 8 3.00012 8C2.44784 8 2.00012 8.44772 2.00012 9C2.00012 9.55228 2.44784 10 3.00012 10Z"
+			data-color="color-2"
+			fill="currentColor"
+		/>
+		<path
+			d="M15.0001 10C15.5524 10 16.0001 9.55228 16.0001 9C16.0001 8.44772 15.5524 8 15.0001 8C14.4478 8 14.0001 8.44772 14.0001 9C14.0001 9.55228 14.4478 10 15.0001 10Z"
+			data-color="color-2"
+			fill="currentColor"
+		/>
+		<path
+			d="M9.00012 16C9.55241 16 10.0001 15.5523 10.0001 15C10.0001 14.4477 9.55241 14 9.00012 14C8.44784 14 8.00012 14.4477 8.00012 15C8.00012 15.5523 8.44784 16 9.00012 16Z"
+			data-color="color-2"
+			fill="currentColor"
+		/>
+		<path
+			d="M3.00012 4C3.55241 4 4.00012 3.55228 4.00012 3C4.00012 2.44772 3.55241 2 3.00012 2C2.44784 2 2.00012 2.44772 2.00012 3C2.00012 3.55228 2.44784 4 3.00012 4Z"
+			fill="currentColor"
+		/>
+		<path
+			d="M15.0001 4C15.5524 4 16.0001 3.55228 16.0001 3C16.0001 2.44772 15.5524 2 15.0001 2C14.4478 2 14.0001 2.44772 14.0001 3C14.0001 3.55228 14.4478 4 15.0001 4Z"
+			fill="currentColor"
+		/>
+		<path
+			d="M9.00012 10C9.55241 10 10.0001 9.55228 10.0001 9C10.0001 8.44772 9.55241 8 9.00012 8C8.44784 8 8.00012 8.44772 8.00012 9C8.00012 9.55228 8.44784 10 9.00012 10Z"
+			fill="currentColor"
+		/>
+		<path
+			d="M3.00012 16C3.55241 16 4.00012 15.5523 4.00012 15C4.00012 14.4477 3.55241 14 3.00012 14C2.44784 14 2.00012 14.4477 2.00012 15C2.00012 15.5523 2.44784 16 3.00012 16Z"
+			fill="currentColor"
+		/>
+		<path
+			d="M15.0001 16C15.5524 16 16.0001 15.5523 16.0001 15C16.0001 14.4477 15.5524 14 15.0001 14C14.4478 14 14.0001 14.4477 14.0001 15C14.0001 15.5523 14.4478 16 15.0001 16Z"
+			fill="currentColor"
+		/>
+		</NucleoIcon>
+	)
+);
+DotsNineIcon.displayName = "DotsNineIcon";

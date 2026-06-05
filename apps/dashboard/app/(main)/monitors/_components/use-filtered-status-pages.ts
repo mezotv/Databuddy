@@ -9,7 +9,7 @@ export function useFilteredStatusPages(
 	pages: StatusPage[],
 	searchQuery: string,
 	sortBy: SortOption,
-	statusFilter: StatusFilter = "all",
+	statusFilter: StatusFilter = "all"
 ): StatusPage[] {
 	const [debouncedSearch] = useDebouncedValue(searchQuery, { wait: 200 });
 
@@ -28,7 +28,7 @@ export function useFilteredStatusPages(
 				(p) =>
 					p.name.toLowerCase().includes(query) ||
 					p.slug.toLowerCase().includes(query) ||
-					(p.description?.toLowerCase().includes(query) ?? false),
+					(p.description?.toLowerCase().includes(query) ?? false)
 			);
 		}
 
@@ -36,13 +36,13 @@ export function useFilteredStatusPages(
 			case "newest":
 				result.sort(
 					(a, b) =>
-						new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+						new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
 				);
 				break;
 			case "oldest":
 				result.sort(
 					(a, b) =>
-						new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+						new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
 				);
 				break;
 			case "name-asc":

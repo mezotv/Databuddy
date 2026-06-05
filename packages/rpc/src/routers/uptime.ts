@@ -1,5 +1,10 @@
-import { and, db, eq } from "@databuddy/db";
-import { uptimeSchedules } from "@databuddy/db/schema";
+import { db, eq } from "@databuddy/db";
+import {
+	statusPageMonitors,
+	statusPages,
+	uptimeSchedules,
+} from "@databuddy/db/schema";
+import { invalidateStatusPageCache } from "@databuddy/redis";
 import { randomUUIDv7 } from "bun";
 import { z } from "zod";
 import { rpcError } from "../errors";
@@ -45,12 +50,35 @@ function parseStoredGranularity(
 	return parsed.data;
 }
 
+async function invalidateStatusPageCachesForSchedule(
+	scheduleId: string
+): Promise<void> {
+	const rows = await db
+		.select({ slug: statusPages.slug })
+		.from(statusPageMonitors)
+		.innerJoin(statusPages, eq(statusPageMonitors.statusPageId, statusPages.id))
+		.where(eq(statusPageMonitors.uptimeScheduleId, scheduleId));
+
+	const results = await Promise.allSettled(
+		rows.map((row) =>
+			Promise.resolve().then(() => invalidateStatusPageCache(row.slug))
+		)
+	);
+	const failed = results.filter((result) => result.status === "rejected");
+	if (failed.length > 0) {
+		logger.warn(
+			{ failedCount: failed.length, scheduleId },
+			"Failed to invalidate status page caches for uptime schedule"
+		);
+	}
+}
+
 async function getScheduleAndAuthorize(
 	scheduleId: string,
 	context: Parameters<typeof withWorkspace>[0]
 ) {
 	const schedule = await db.query.uptimeSchedules.findFirst({
-		where: eq(uptimeSchedules.id, scheduleId),
+		where: { id: scheduleId },
 	});
 
 	if (!schedule) {
@@ -112,18 +140,16 @@ export const uptimeRouter = {
 		.input(z.object({ websiteId: z.string() }))
 		.output(scheduleOutputSchema.nullable())
 		.handler(async ({ context, input }) => {
-			const schedule = await db.query.uptimeSchedules.findFirst({
-				where: eq(uptimeSchedules.websiteId, input.websiteId),
-				orderBy: (table, { desc }) => [desc(table.createdAt)],
+			await withWorkspace(context, {
+				websiteId: input.websiteId,
+				resource: "website",
+				permissions: ["read"],
 			});
 
-			if (schedule) {
-				await withWorkspace(context, {
-					organizationId: schedule.organizationId,
-					resource: "website",
-					permissions: ["read"],
-				});
-			}
+			const schedule = await db.query.uptimeSchedules.findFirst({
+				where: { websiteId: input.websiteId },
+				orderBy: { createdAt: "desc" },
+			});
 
 			return schedule ?? null;
 		}),
@@ -159,8 +185,8 @@ export const uptimeRouter = {
 			});
 
 			return db.query.uptimeSchedules.findMany({
-				where: eq(uptimeSchedules.organizationId, orgId),
-				orderBy: (table, { desc }) => [desc(table.createdAt)],
+				where: { organizationId: orgId },
+				orderBy: { createdAt: "desc" },
 				with: { website: true },
 				limit: 100,
 			});
@@ -179,7 +205,7 @@ export const uptimeRouter = {
 		.handler(async ({ context, input }) => {
 			const [dbSchedule, schedulerActive] = await Promise.all([
 				db.query.uptimeSchedules.findFirst({
-					where: eq(uptimeSchedules.id, input.scheduleId),
+					where: { id: input.scheduleId },
 					with: { website: true },
 				}),
 				hasUptimeSchedule(input.scheduleId).catch(() => false),
@@ -242,10 +268,7 @@ export const uptimeRouter = {
 			});
 
 			const existing = await db.query.uptimeSchedules.findFirst({
-				where: and(
-					eq(uptimeSchedules.url, input.url),
-					eq(uptimeSchedules.organizationId, organizationId)
-				),
+				where: { url: input.url, organizationId },
 			});
 
 			if (existing) {
@@ -273,7 +296,7 @@ export const uptimeRouter = {
 			logger.info({ scheduleId, url: input.url }, "Schedule created");
 
 			const created = await db.query.uptimeSchedules.findFirst({
-				where: eq(uptimeSchedules.id, scheduleId),
+				where: { id: scheduleId },
 			});
 
 			return {
@@ -346,11 +369,12 @@ export const uptimeRouter = {
 				updateData,
 				existingSchedule
 			);
+			await invalidateStatusPageCachesForSchedule(input.scheduleId);
 
 			logger.info({ scheduleId: input.scheduleId }, "Schedule updated");
 
 			const schedule = await db.query.uptimeSchedules.findFirst({
-				where: eq(uptimeSchedules.id, input.scheduleId),
+				where: { id: input.scheduleId },
 			});
 
 			return {
@@ -374,6 +398,7 @@ export const uptimeRouter = {
 		.output(z.object({ success: z.literal(true) }))
 		.handler(async ({ context, input }) => {
 			await getScheduleAndAuthorize(input.scheduleId, context);
+			await invalidateStatusPageCachesForSchedule(input.scheduleId);
 
 			await deleteScheduleWithScheduler(input.scheduleId);
 
@@ -418,6 +443,8 @@ export const uptimeRouter = {
 				throw rpcError.internal("Failed to update monitor status");
 			}
 
+			await invalidateStatusPageCachesForSchedule(input.scheduleId);
+
 			logger.info(
 				{ scheduleId: input.scheduleId, paused: input.pause },
 				"Schedule toggled"
@@ -452,6 +479,8 @@ export const uptimeRouter = {
 				);
 				throw rpcError.internal("Failed to pause monitor");
 			}
+
+			await invalidateStatusPageCachesForSchedule(input.scheduleId);
 
 			logger.info({ scheduleId: input.scheduleId }, "Schedule paused");
 			return { success: true, isPaused: true };
@@ -495,6 +524,7 @@ export const uptimeRouter = {
 					updatedAt: new Date(),
 				})
 				.where(eq(uptimeSchedules.id, input.scheduleId));
+			await invalidateStatusPageCachesForSchedule(input.scheduleId);
 
 			logger.info(
 				{
@@ -523,6 +553,7 @@ export const uptimeRouter = {
 			const schedule = await getScheduleAndAuthorize(input.scheduleId, context);
 
 			await triggerManualUptimeCheck(input.scheduleId, schedule.isPaused);
+			await invalidateStatusPageCachesForSchedule(input.scheduleId);
 
 			logger.info({ scheduleId: input.scheduleId }, "Manual check triggered");
 			return { success: true };
@@ -557,6 +588,8 @@ export const uptimeRouter = {
 				);
 				throw rpcError.internal("Failed to resume monitor");
 			}
+
+			await invalidateStatusPageCachesForSchedule(input.scheduleId);
 
 			logger.info({ scheduleId: input.scheduleId }, "Schedule resumed");
 			return { success: true, isPaused: false };

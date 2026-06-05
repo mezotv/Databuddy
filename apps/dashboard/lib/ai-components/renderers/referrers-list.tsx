@@ -154,7 +154,10 @@ export function ReferrersListRenderer({
 				<div className="rounded-md bg-background px-1 py-1">
 					<div className="max-h-80 space-y-1 overflow-y-auto">
 						{referrers.map((referrer, idx) => (
-							<ReferrerRow key={`${referrer.name}-${idx}`} referrer={referrer} />
+							<ReferrerRow
+								key={`${referrer.name}-${idx}`}
+								referrer={referrer}
+							/>
 						))}
 					</div>
 				</div>

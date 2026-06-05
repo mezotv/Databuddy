@@ -1,4 +1,7 @@
+import { dayjs, guessTimezone } from "@databuddy/ui";
 import { atom } from "jotai";
+import type { DynamicQueryFilter } from "./filter-types";
+export type { DynamicQueryFilter } from "./filter-types";
 import { RECOMMENDED_DEFAULTS } from "../../app/(main)/websites/[id]/_components/utils/tracking-defaults";
 import {
 	enableAllAdvancedTracking,
@@ -6,20 +9,6 @@ import {
 	enableAllOptimization,
 } from "../../app/(main)/websites/[id]/_components/utils/tracking-helpers";
 import type { TrackingOptions } from "../../app/(main)/websites/[id]/_components/utils/types";
-import { dayjs, guessTimezone } from "@databuddy/ui";
-
-export interface DynamicQueryFilter {
-	field: string;
-	operator:
-		| "eq"
-		| "ne"
-		| "contains"
-		| "not_contains"
-		| "starts_with"
-		| "in"
-		| "not_in";
-	value: string | number | (string | number)[];
-}
 
 export interface DateRangeState {
 	endDate: Date;
@@ -303,7 +292,7 @@ export const savedFiltersAtom = atom(
 		const { filters, loaded } = get(savedFiltersBaseAtom);
 		return { savedFilters: filters, isLoading: !loaded };
 	},
-	(get, set, update: { websiteId: string; filters: SavedFilter[] }) => {
+	(_get, set, update: { websiteId: string; filters: SavedFilter[] }) => {
 		set(savedFiltersBaseAtom, {
 			websiteId: update.websiteId,
 			filters: update.filters,

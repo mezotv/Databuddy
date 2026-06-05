@@ -64,10 +64,8 @@ function DataTableHeaderBlock({
 	const rowLabel = rowCount === 1 ? "1 row" : `${rowCount} rows`;
 	return (
 		<div className="flex items-center gap-2.5 rounded-md bg-background px-2 py-2">
-			<div className="flex size-6 shrink-0 items-center justify-center rounded bg-accent mb-auto">
-				<TableIcon
-					className="size-3.5 text-muted-foreground"
-				/>
+			<div className="mb-auto flex size-6 shrink-0 items-center justify-center rounded bg-accent">
+				<TableIcon className="size-3.5 text-muted-foreground" />
 			</div>
 			<div className="min-w-0 flex-1">
 				{title ? (
@@ -155,7 +153,7 @@ export function DataTableRenderer({
 									{columns.map((column, colIdx) => (
 										<td
 											className={cn(
-												"text-pretty px-3 py-2 bg-muted/30 first:rounded-l-sm last:rounded-r-sm ",
+												"text-pretty bg-muted/30 px-3 py-2 first:rounded-l-sm last:rounded-r-sm",
 												getAlignmentClass(column.align),
 												colIdx === 0 ? "font-medium" : "tabular-nums"
 											)}

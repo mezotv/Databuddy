@@ -1,5 +1,7 @@
+import { hash } from "bun";
+
 export function getContentHash(content: string): string {
-	return Bun.hash(content).toString();
+	return hash(content).toString();
 }
 
 export async function generateSriHash(content: string): Promise<string> {

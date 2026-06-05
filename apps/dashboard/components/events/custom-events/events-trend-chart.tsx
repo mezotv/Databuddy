@@ -277,10 +277,12 @@ function AggregateLegend() {
 	);
 }
 
+const MAX_EVENT_SERIES = 20;
+
 export function EventsTrendChart({
 	chartData,
 	perEventData = [],
-	eventNames = [],
+	eventNames: rawEventNames = [],
 	isFetching,
 	isLoading,
 }: EventsTrendChartProps) {
@@ -293,6 +295,24 @@ export function EventsTrendChart({
 	const [chartMode, setChartMode] = useState<ChartMode>("by-event");
 	const [chartType, setChartType] = useState<ChartType>("area");
 	const [hiddenEvents, setHiddenEvents] = useState<Set<string>>(new Set());
+
+	const eventNames = useMemo(() => {
+		if (rawEventNames.length <= MAX_EVENT_SERIES) {
+			return rawEventNames;
+		}
+		const totals = new Map<string, number>();
+		for (const row of perEventData) {
+			for (const name of rawEventNames) {
+				const value = row[name];
+				if (typeof value === "number") {
+					totals.set(name, (totals.get(name) ?? 0) + value);
+				}
+			}
+		}
+		return [...rawEventNames]
+			.sort((a, b) => (totals.get(b) ?? 0) - (totals.get(a) ?? 0))
+			.slice(0, MAX_EVENT_SERIES);
+	}, [rawEventNames, perEventData]);
 
 	const hasPerEventData = perEventData.length > 0 && eventNames.length > 0;
 	const activeMode = hasPerEventData ? chartMode : "aggregate";

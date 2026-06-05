@@ -4,18 +4,37 @@ import {
 	isApiKeyPresent,
 } from "@databuddy/api-keys/resolve";
 import { auth } from "@databuddy/auth";
-import { and, db, eq } from "@databuddy/db";
-import { member } from "@databuddy/db/schema";
+import { db } from "@databuddy/db";
 import { Elysia } from "elysia";
 import { getResolvedAuth } from "../lib/auth-wide-event";
 import { record } from "../lib/tracing";
 import { getCachedWebsite, getTimezone } from "../lib/website-utils";
+
+interface SessionUser {
+	email: string;
+	id: string;
+	name: string;
+}
 
 function json(status: number, body: unknown) {
 	return new Response(JSON.stringify(body), {
 		status,
 		headers: { "Content-Type": "application/json" },
 	});
+}
+
+function getSessionUser(
+	session: Awaited<ReturnType<typeof auth.api.getSession>> | null
+): SessionUser | null {
+	if (!session?.user) {
+		return null;
+	}
+
+	return {
+		email: session.user.email,
+		id: session.user.id,
+		name: session.user.name,
+	};
 }
 
 export function websiteAuth() {
@@ -27,6 +46,8 @@ export function websiteAuth() {
 					session: null,
 					website: undefined,
 					timezone: "UTC",
+					_apiKey: null,
+					_apiKeyPresent: false,
 					_authChecked: true,
 				} as const;
 			}
@@ -35,8 +56,7 @@ export function websiteAuth() {
 			const websiteId = url.searchParams.get("website_id");
 
 			const preResolved = getResolvedAuth(request.headers);
-			let sessionUser: { id: string; name: string; email: string } | null =
-				null;
+			let sessionUser: SessionUser | null = null;
 			let session: Awaited<ReturnType<typeof auth.api.getSession>> | null =
 				null;
 			let apiKey: Awaited<ReturnType<typeof getApiKeyFromHeader>> | null = null;
@@ -44,28 +64,24 @@ export function websiteAuth() {
 
 			if (preResolved) {
 				session = preResolved.session;
-				sessionUser = (session?.user as typeof sessionUser) ?? null;
+				sessionUser = getSessionUser(session);
 				apiKey = preResolved.apiKeyResult?.key ?? null;
 			} else {
 				const [resolvedApiKey, resolvedSession] = await record(
 					"getAuthContext",
 					() =>
 						Promise.all([
-							apiKeyPresent
-								? getApiKeyFromHeader(request.headers)
-								: null,
+							apiKeyPresent ? getApiKeyFromHeader(request.headers) : null,
 							auth.api.getSession({ headers: request.headers }),
 						])
 				);
 				session = resolvedSession;
-				sessionUser = (session?.user as typeof sessionUser) ?? null;
+				sessionUser = getSessionUser(session);
 				apiKey = resolvedApiKey;
 			}
 
 			const website = websiteId
-				? await record("getCachedWebsite", () =>
-						getCachedWebsite(websiteId)
-					)
+				? await record("getCachedWebsite", () => getCachedWebsite(websiteId))
 				: undefined;
 
 			const timezone = session?.user
@@ -82,35 +98,33 @@ export function websiteAuth() {
 				_authChecked: true,
 			} as const;
 		})
-		.onBeforeHandle(
-			async ({ user, website, _apiKey, _apiKeyPresent, request }) => {
-				if (isPreflight(request)) {
-					return;
-				}
-
-				const url = new URL(request.url);
-				const websiteId = url.searchParams.get("website_id");
-
-				if (!websiteId) {
-					if (user || _apiKey) {
-						return null;
-					}
-					return json(401, {
-						success: false,
-						error: "Authentication required",
-						code: "AUTH_REQUIRED",
-					});
-				}
-
-				return checkWebsiteAuth(
-					websiteId,
-					user,
-					website ?? null,
-					_apiKey,
-					_apiKeyPresent
-				);
+		.onBeforeHandle(({ user, website, _apiKey, _apiKeyPresent, request }) => {
+			if (isPreflight(request)) {
+				return;
 			}
-		);
+
+			const url = new URL(request.url);
+			const websiteId = url.searchParams.get("website_id");
+
+			if (!websiteId) {
+				if (user || _apiKey) {
+					return null;
+				}
+				return json(401, {
+					success: false,
+					error: "Authentication required",
+					code: "AUTH_REQUIRED",
+				});
+			}
+
+			return checkWebsiteAuth(
+				websiteId,
+				user,
+				website ?? null,
+				_apiKey,
+				_apiKeyPresent
+			);
+		});
 }
 
 function isPreflight(request: Request): boolean {
@@ -119,7 +133,7 @@ function isPreflight(request: Request): boolean {
 
 async function checkWebsiteAuth(
 	websiteId: string,
-	sessionUser: { id: string; name: string; email: string } | null,
+	sessionUser: SessionUser | null,
 	website: Awaited<ReturnType<typeof getCachedWebsite>> | null,
 	apiKey: Awaited<ReturnType<typeof getApiKeyFromHeader>> | null,
 	apiKeyPresent: boolean
@@ -145,10 +159,7 @@ async function checkWebsiteAuth(
 		}
 
 		const membership = await db.query.member.findFirst({
-			where: and(
-				eq(member.userId, sessionUser.id),
-				eq(member.organizationId, website.organizationId)
-			),
+			where: { userId: sessionUser.id, organizationId: website.organizationId },
 			columns: {
 				id: true,
 			},

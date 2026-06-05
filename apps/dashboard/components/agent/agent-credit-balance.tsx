@@ -29,6 +29,9 @@ export function AgentCreditBalance({
 	const shakeNonce = useAtomValue(agentCreditShakeNonceAtom);
 	const prevStatusRef = useRef(status);
 
+	const refetchRef = useRef(refetch);
+	refetchRef.current = refetch;
+
 	useEffect(() => {
 		const prev = prevStatusRef.current;
 		prevStatusRef.current = status;
@@ -38,9 +41,9 @@ export function AgentCreditBalance({
 		if (!justFinished) {
 			return;
 		}
-		const timer = setTimeout(() => refetch(), 1500);
+		const timer = setTimeout(() => refetchRef.current(), 1500);
 		return () => clearTimeout(timer);
-	}, [status, refetch]);
+	}, [status]);
 
 	if (isLoading) {
 		return (
@@ -88,9 +91,7 @@ export function AgentCreditBalance({
 			}
 		>
 			<motion.div
-				animate={
-					shakeNonce === 0 ? { x: 0 } : { x: [0, -2, 2, -2, 2, 0] }
-				}
+				animate={shakeNonce === 0 ? { x: 0 } : { x: [0, -2, 2, -2, 2, 0] }}
 				className="inline-flex max-w-full"
 				initial={{ x: 0 }}
 				key={shakeNonce}
@@ -111,9 +112,7 @@ export function AgentCreditBalance({
 					size="sm"
 					variant="secondary"
 				>
-					{variant === "compact" ? null : (
-						<CoinsIcon className="size-3" />
-					)}
+					{variant === "compact" ? null : <CoinsIcon className="size-3" />}
 					<span className="font-medium tabular-nums">{label}</span>
 				</Button>
 			</motion.div>

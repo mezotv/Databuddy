@@ -1,3 +1,3 @@
 "use client";
 
-export { default } from "../../../../(main)/websites/[id]/users/[userId]/page";
+export { default } from "@/app/(main)/websites/[id]/users/[userId]/page";

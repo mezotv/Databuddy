@@ -87,6 +87,7 @@ export default async function SwitchFromPage({ params }: PageProps) {
 			}
 			introText={introText}
 			migrationSection={migrationSection}
+			pageType="switch_from"
 			pageUrl={pageUrl}
 			pricingTiers={pricingTiers}
 			structuredDescription={description}

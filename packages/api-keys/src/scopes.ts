@@ -1,7 +1,6 @@
 export const API_SCOPES = [
 	"read:data",
 	"track:events",
-	"track:llm",
 	"read:links",
 	"write:links",
 	"manage:websites",
@@ -9,9 +8,7 @@ export const API_SCOPES = [
 	"manage:config",
 ] as const;
 
-export type ApiScope = (typeof API_SCOPES)[number] | LegacyScope;
-
-type LegacyScope = "write:llm";
+export type ApiScope = (typeof API_SCOPES)[number];
 
 export type LinksPermission = "read" | "create" | "update" | "delete";
 

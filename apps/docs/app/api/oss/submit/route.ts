@@ -1,5 +1,7 @@
 import { checkBotId } from "botid/server";
 import { type NextRequest, NextResponse } from "next/server";
+import { enforceFormRateLimit } from "@/lib/rate-limit";
+import { escapeMrkdwn, mrkdwnLink } from "@/lib/slack-format";
 
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || "";
 const SLACK_TIMEOUT_MS = 10_000;
@@ -135,7 +137,7 @@ function validateFormData(data: unknown): ValidationResult {
 function createSlackField(label: string, value: string) {
 	return {
 		type: "mrkdwn" as const,
-		text: `*${label}:*\n${value}`,
+		text: `*${label}:*\n${escapeMrkdwn(value)}`,
 	};
 }
 
@@ -144,7 +146,10 @@ function buildSlackBlocks(data: OssFormData, ip: string): unknown[] {
 		createSlackField("Name", data.name),
 		createSlackField("Email", data.email),
 		createSlackField("Project", data.projectName),
-		createSlackField("Repo", `<${data.repoUrl}|${data.repoUrl}>`),
+		{
+			type: "mrkdwn" as const,
+			text: `*Repo:*\n${mrkdwnLink(data.repoUrl, data.repoUrl)}`,
+		},
 		createSlackField(
 			"Accelerator",
 			ACCELERATOR_LABELS[data.accelerator] ?? data.accelerator
@@ -175,7 +180,7 @@ function buildSlackBlocks(data: OssFormData, ip: string): unknown[] {
 			type: "section",
 			text: {
 				type: "mrkdwn",
-				text: `*Notes:*\n${data.notes}`,
+				text: `*Notes:*\n${escapeMrkdwn(data.notes)}`,
 			},
 		});
 	}
@@ -212,6 +217,15 @@ export async function POST(request: NextRequest) {
 	const verification = await checkBotId();
 	if (verification.isBot) {
 		return NextResponse.json({ error: "Access denied" }, { status: 403 });
+	}
+
+	const rateLimited = await enforceFormRateLimit(request, {
+		key: "oss",
+		max: 3,
+		windowSec: 600,
+	});
+	if (rateLimited) {
+		return rateLimited;
 	}
 
 	const clientIP = getClientIP(request);

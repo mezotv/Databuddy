@@ -1,12 +1,16 @@
 import { connect } from "node:tls";
-import { db, eq } from "@databuddy/db";
-import { uptimeSchedules } from "@databuddy/db/schema";
-import { validateUrl } from "@databuddy/shared/ssrf-guard";
+import { db } from "@databuddy/db";
+import {
+	safeFetch,
+	SsrfError,
+	validateUrl,
+} from "@databuddy/shared/ssrf-guard";
+import { CryptoHasher } from "bun";
 import { Data, Effect } from "effect";
 import { UPTIME_ENV } from "./lib/env";
 import { extractHealth } from "./json-parser";
 import { captureError } from "./lib/tracing";
-import type { ActionResult, UptimeData } from "./types";
+import type { ActionResult, ScheduleLookupReason, UptimeData } from "./types";
 import { MonitorStatus } from "./types";
 
 const DEFAULT_TIMEOUT = 60_000;
@@ -15,7 +19,7 @@ const MAX_REDIRECTS = 10;
 const USER_AGENT =
 	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 const PROBE_REGION =
-	process.env.PROBE_REGION || process.env.UNKEY_REGION || "default";
+	process.env.PROBE_REGION || process.env.RAILWAY_REPLICA_REGION || "default";
 
 interface FetchSuccess {
 	bytes: number;
@@ -58,6 +62,7 @@ export interface CheckOptions {
 
 class ScheduleLookupError extends Data.TaggedError("ScheduleLookupError")<{
 	message: string;
+	reason: ScheduleLookupReason;
 }> {}
 
 class UptimeCheckError extends Data.TaggedError("UptimeCheckError")<{
@@ -65,7 +70,9 @@ class UptimeCheckError extends Data.TaggedError("UptimeCheckError")<{
 }> {}
 
 function normalizeUrl(url: string): string {
-	if (url.startsWith("http://") || url.startsWith("https://")) return url;
+	if (url.startsWith("http://") || url.startsWith("https://")) {
+		return url;
+	}
 	return `https://${url}`;
 }
 
@@ -90,37 +97,56 @@ function applyCacheBust(url: string): string {
 	return parsed.toString();
 }
 
+const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
+const TIMED_OUT_PATTERN = /timed out/;
+
+class ResponseTooLargeError extends Error {
+	constructor(limit: number) {
+		super(`Response exceeded ${limit} bytes`);
+	}
+}
+
+async function readBoundedBody(res: Response, limit: number): Promise<string> {
+	if (!res.body) {
+		return "";
+	}
+	const reader = res.body.getReader();
+	const decoder = new TextDecoder();
+	const chunks: string[] = [];
+	let total = 0;
+	while (true) {
+		const { value, done } = await reader.read();
+		if (done) {
+			break;
+		}
+		total += value.byteLength;
+		if (total > limit) {
+			await reader.cancel().catch(() => undefined);
+			throw new ResponseTooLargeError(limit);
+		}
+		chunks.push(decoder.decode(value, { stream: true }));
+	}
+	chunks.push(decoder.decode());
+	return chunks.join("");
+}
+
 async function pingWebsite(
 	url: string,
 	timeout: number,
-	cacheBust: boolean,
+	cacheBust: boolean
 ): Promise<FetchSuccess | FetchFailure> {
-	const abort = new AbortController();
-	const timer = setTimeout(() => abort.abort(), timeout);
 	const start = performance.now();
+	let redirects = 0;
+	let current = cacheBust ? applyCacheBust(url) : url;
+	let ttfb = 0;
 
 	try {
-		let redirects = 0;
-		let current = cacheBust ? applyCacheBust(url) : url;
-		let ttfb = 0;
-
 		while (redirects < MAX_REDIRECTS) {
-			const urlCheck = await validateUrl(current);
-			if (!urlCheck.safe) {
-				return {
-					ok: false as const,
-					statusCode: 0,
-					ttfb: 0,
-					total: Math.round(performance.now() - start),
-					error: urlCheck.error ?? "Target resolves to a private address",
-				};
-			}
-
-			const res = await fetch(current, {
+			const res = await safeFetch(current, {
 				method: "GET",
-				signal: abort.signal,
-				redirect: "manual",
 				headers: HEADERS,
+				followRedirects: false,
+				timeoutMs: timeout,
 			});
 
 			if (ttfb === 0) {
@@ -129,7 +155,9 @@ async function pingWebsite(
 
 			if (res.status >= 300 && res.status < 400) {
 				const location = res.headers.get("location");
-				if (!location) break;
+				if (!location) {
+					break;
+				}
 				redirects += 1;
 				current = new URL(location, current).toString();
 				continue;
@@ -137,16 +165,46 @@ async function pingWebsite(
 
 			const contentType = res.headers.get("content-type");
 			const isJson = contentType?.includes("application/json");
-			const [content, parsedJson]: [string, unknown] = isJson
-				? await res
-						.json()
-						.then(
-							(j: unknown) => [JSON.stringify(j), j] as [string, unknown],
-						)
-				: [await res.text(), undefined];
+			const contentLength = res.headers.get("content-length");
+			if (
+				contentLength &&
+				Number.parseInt(contentLength, 10) > MAX_RESPONSE_BYTES
+			) {
+				return {
+					ok: false,
+					statusCode: res.status,
+					ttfb: Math.round(ttfb),
+					total: Math.round(performance.now() - start),
+					error: `Response too large (${contentLength} > ${MAX_RESPONSE_BYTES} bytes)`,
+				};
+			}
+			let bodyText: string;
+			try {
+				bodyText = await readBoundedBody(res, MAX_RESPONSE_BYTES);
+			} catch (err) {
+				if (err instanceof ResponseTooLargeError) {
+					return {
+						ok: false,
+						statusCode: res.status,
+						ttfb: Math.round(ttfb),
+						total: Math.round(performance.now() - start),
+						error: err.message,
+					};
+				}
+				throw err;
+			}
+			let parsedJson: unknown;
+			let content = bodyText;
+			if (isJson) {
+				try {
+					parsedJson = JSON.parse(bodyText);
+					content = JSON.stringify(parsedJson);
+				} catch {
+					parsedJson = undefined;
+				}
+			}
 
 			const total = performance.now() - start;
-			clearTimeout(timer);
 
 			if (res.status >= 500) {
 				return {
@@ -164,7 +222,7 @@ async function pingWebsite(
 				ttfb: Math.round(ttfb),
 				total: Math.round(total),
 				redirects,
-				bytes: new Blob([content]).size,
+				bytes: Buffer.byteLength(content, "utf8"),
 				content,
 				contentType,
 				parsedJson,
@@ -173,10 +231,18 @@ async function pingWebsite(
 
 		throw new Error(`Too many redirects (max ${MAX_REDIRECTS})`);
 	} catch (error) {
-		clearTimeout(timer);
 		const total = performance.now() - start;
 
-		if (error instanceof Error && error.name === "AbortError") {
+		if (error instanceof SsrfError) {
+			return {
+				ok: false,
+				statusCode: 0,
+				ttfb: 0,
+				total: Math.round(total),
+				error: error.message,
+			};
+		}
+		if (error instanceof Error && TIMED_OUT_PATTERN.test(error.message)) {
 			return {
 				ok: false,
 				statusCode: 0,
@@ -197,53 +263,60 @@ async function pingWebsite(
 }
 
 const checkCertificate = (url: string) =>
-	Effect.async<{ valid: boolean; expiry: number }>((resume) => {
+	Effect.promise<{ valid: boolean; expiry: number }>(async () => {
+		const fallback = { valid: false, expiry: 0 };
 		try {
 			const parsed = new URL(url);
-
 			if (parsed.protocol !== "https:") {
-				resume(Effect.succeed({ valid: false, expiry: 0 }));
-				return;
+				return fallback;
+			}
+
+			const urlCheck = await validateUrl(url);
+			if (!urlCheck.safe) {
+				return fallback;
 			}
 
 			const port = parsed.port ? Number.parseInt(parsed.port, 10) : 443;
-			const socket = connect(
-				{
-					host: parsed.hostname,
-					port,
-					servername: parsed.hostname,
-					timeout: 5000,
-				},
-				() => {
-					const cert = socket.getPeerCertificate();
-					socket.destroy();
 
-					if (!cert?.valid_to) {
-						resume(Effect.succeed({ valid: false, expiry: 0 }));
-						return;
-					}
+			return await new Promise<{ valid: boolean; expiry: number }>(
+				(resolve) => {
+					const socket = connect(
+						{
+							host: parsed.hostname,
+							port,
+							servername: parsed.hostname,
+							timeout: 5000,
+						},
+						() => {
+							const cert = socket.getPeerCertificate();
+							socket.destroy();
 
-					const expiry = new Date(cert.valid_to);
-					resume(
-						Effect.succeed({
-							valid: expiry > new Date(),
-							expiry: expiry.getTime(),
-						}),
+							if (!cert?.valid_to) {
+								resolve(fallback);
+								return;
+							}
+
+							const expiry = new Date(cert.valid_to);
+							resolve({
+								valid: expiry > new Date(),
+								expiry: expiry.getTime(),
+							});
+						}
 					);
-				},
+
+					socket.on("error", () => {
+						socket.destroy();
+						resolve(fallback);
+					});
+
+					socket.on("timeout", () => {
+						socket.destroy();
+						resolve(fallback);
+					});
+				}
 			);
-
-			socket.on("error", () => {
-				socket.destroy();
-				resume(Effect.succeed({ valid: false, expiry: 0 }));
-			});
-
-			socket.on("timeout", () => {
-				socket.destroy();
-				resume(Effect.succeed({ valid: false, expiry: 0 }));
-			});
 		} catch {
-			resume(Effect.succeed({ valid: false, expiry: 0 }));
+			return fallback;
 		}
 	});
 
@@ -258,10 +331,11 @@ const getProbeMetadata = Effect.tryPromise({
 				});
 				if (res.ok) {
 					const data = await res.json();
-					cachedProbeIp =
-						typeof data?.ip === "string" ? data.ip : "unknown";
+					cachedProbeIp = typeof data?.ip === "string" ? data.ip : "unknown";
 				}
-			} catch {}
+			} catch {
+				// Probe metadata is best-effort; uptime checks should continue without it.
+			}
 			cachedProbeIp ??= "unknown";
 		}
 		return { ip: cachedProbeIp, region: PROBE_REGION };
@@ -273,24 +347,30 @@ const resolveSchedule = (id: string) =>
 	Effect.tryPromise({
 		try: () =>
 			db.query.uptimeSchedules.findFirst({
-				where: eq(uptimeSchedules.id, id),
+				where: { id },
 				with: { website: true },
 			}),
-		catch: (cause) => new ScheduleLookupError({ message: String(cause) }),
+		catch: (cause) =>
+			new ScheduleLookupError({
+				message: String(cause),
+				reason: "transient",
+			}),
 	}).pipe(
 		Effect.flatMap((schedule) => {
 			if (!schedule) {
 				return Effect.fail(
 					new ScheduleLookupError({
 						message: `Schedule ${id} not found`,
-					}),
+						reason: "not_found",
+					})
 				);
 			}
 			if (!schedule.url) {
 				return Effect.fail(
 					new ScheduleLookupError({
 						message: `Schedule ${id} has invalid data (missing url)`,
-					}),
+						reason: "malformed",
+					})
 				);
 			}
 			return Effect.succeed({
@@ -310,14 +390,14 @@ const resolveSchedule = (id: string) =>
 				timeout: schedule.timeout,
 				cacheBust: schedule.cacheBust,
 			} satisfies ScheduleData);
-		}),
+		})
 	);
 
 const runUptimeCheck = (
 	siteId: string,
 	url: string,
 	attempt: number,
-	options: CheckOptions,
+	options: CheckOptions
 ) =>
 	Effect.gen(function* () {
 		const normalizedUrl = normalizeUrl(url);
@@ -330,15 +410,14 @@ const runUptimeCheck = (
 						pingWebsite(
 							normalizedUrl,
 							options.timeout ?? DEFAULT_TIMEOUT,
-							options.cacheBust ?? false,
+							options.cacheBust ?? false
 						),
-					catch: (cause) =>
-						new UptimeCheckError({ message: String(cause) }),
+					catch: (cause) => new UptimeCheckError({ message: String(cause) }),
 				}),
 				getProbeMetadata,
 				checkCertificate(normalizedUrl),
 			],
-			{ concurrency: "unbounded" },
+			{ concurrency: "unbounded" }
 		);
 
 		const health =
@@ -359,9 +438,7 @@ const runUptimeCheck = (
 			failure_streak: 0,
 			response_bytes: pingResult.ok ? pingResult.bytes : 0,
 			content_hash: pingResult.ok
-				? new Bun.CryptoHasher("sha256")
-						.update(pingResult.content)
-						.digest("hex")
+				? new CryptoHasher("sha256").update(pingResult.content).digest("hex")
 				: "",
 			redirect_count: pingResult.ok ? pingResult.redirects : 0,
 			probe_region: probe.region,
@@ -385,16 +462,19 @@ export {
 };
 
 export async function lookupSchedule(
-	id: string,
+	id: string
 ): Promise<ActionResult<ScheduleData>> {
 	try {
 		const data = await Effect.runPromise(resolveSchedule(id));
 		return { success: true, data };
 	} catch (error) {
-		captureError(error, { error_step: "lookup_schedule" });
+		const reason: ScheduleLookupReason =
+			error instanceof ScheduleLookupError ? error.reason : "transient";
+		captureError(error, { error_step: "lookup_schedule", reason });
 		return {
 			success: false,
 			error: error instanceof Error ? error.message : "Database error",
+			reason,
 		};
 	}
 }
@@ -403,11 +483,11 @@ export async function checkUptime(
 	siteId: string,
 	url: string,
 	attempt = 1,
-	options: CheckOptions = {},
+	options: CheckOptions = {}
 ): Promise<ActionResult<UptimeData>> {
 	try {
 		const data = await Effect.runPromise(
-			runUptimeCheck(siteId, url, attempt, options),
+			runUptimeCheck(siteId, url, attempt, options)
 		);
 		return { success: true, data };
 	} catch (error) {

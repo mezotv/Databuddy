@@ -2,16 +2,18 @@
 
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
-import type { MouseEvent } from "react";
 import { toast } from "sonner";
 import { EditGoalDialog } from "@/app/(main)/websites/[id]/goals/_components/edit-goal-dialog";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
-import { type CreateGoalData, type Goal, useGoals } from "@/hooks/use-goals";
+import {
+	type CreateGoalData,
+	type Goal,
+	useGoal,
+	useGoals,
+} from "@/hooks/use-goals";
 import { cn } from "@/lib/utils";
 import type { BaseComponentProps } from "../../types";
 import {
-	ArrowRightIcon,
-	CheckIcon,
 	CopyIcon,
 	DotsThreeIcon,
 	EyeIcon,
@@ -84,7 +86,7 @@ function GoalRow({
 	onEdit: () => void;
 	onDelete: () => void;
 }) {
-	const { copyToClipboard, isCopied } = useCopyToClipboard({
+	const { copyToClipboard } = useCopyToClipboard({
 		onCopy: () => toast.success("Target copied"),
 	});
 
@@ -92,106 +94,89 @@ function GoalRow({
 		copyToClipboard(goal.target);
 	}, [copyToClipboard, goal.target]);
 
-	const handleCopyButton = useCallback(
-		(e: MouseEvent<HTMLButtonElement>) => {
-			e.stopPropagation();
-			copyTarget();
-		},
-		[copyTarget]
-	);
-
 	return (
-		// biome-ignore lint/a11y/useSemanticElements: Can't use button - contains nested buttons (dropdown trigger, copy button)
 		<div
 			className={cn(
-				"group/goal-row flex w-full cursor-pointer gap-3 rounded-sm bg-muted/30 px-2 py-2.5 text-left transition-colors hover:bg-muted",
+				"group/goal-row flex w-full gap-3 rounded-sm bg-muted/30 px-2 py-2.5 text-left transition-colors hover:bg-muted",
 				!goal.isActive && "opacity-70"
 			)}
-			onClick={onNavigate}
-			onKeyDown={(e) => {
-				if (e.key === "Enter" || e.key === " ") {
-					e.preventDefault();
-					onNavigate();
-				}
-			}}
-			role="button"
-			tabIndex={0}
 		>
-			<div className="h-max shrink-0 rounded border border-transparent bg-accent p-1.5 text-primary transition-colors group-hover/goal-row:bg-primary/10">
-				<GoalTypeIcon type={goal.type} />
-			</div>
-
-			<div className="min-w-0 flex-1">
-				<div className="flex items-center gap-2">
-					<p className="truncate font-medium text-sm">{goal.name}</p>
-				<div className="flex items-center gap-1">
-				<Badge className="rounded px-1.5 py-0.5! text-[10px]!" variant="muted">
-						{goalTypeLabel(goal.type)}
-					</Badge>
-					{!goal.isActive && (
-						<Badge
-							className="rounded px-1.5 py-0.5 text-[10px]!"
-							variant="default"
-						>
-							Paused
-						</Badge>
-					)}
-				</div>
-				</div>
-				<div className="mt-1 flex items-center gap-2">
-					<button
-						className="flex shrink-0 items-center gap-1.5 rounded border border-transparent bg-muted px-1.5 py-px font-mono text-[10px] transition-colors hover:border-border group-hover/goal-row:bg-primary/10"
-						onClick={handleCopyButton}
-						type="button"
-					>
-						<span className="max-w-[7rem] text-ring truncate">
-							{formatGoalTargetDisplay(goal.target, 28)}
-						</span>
-					</button>
-				</div>
-			</div>
-
-			{goal.createdAt && (
-				<span className="hidden shrink-0 text-[11px] text-muted-foreground sm:block">
-					{fromNow(goal.createdAt)}
-				</span>
-			)}
-
-			<div
-				className="shrink-0"
-				onClick={(e) => e.stopPropagation()}
-				onKeyDown={(e) => e.stopPropagation()}
-				role="presentation"
+			<Button
+				className="min-w-0 flex-1 justify-start gap-3 rounded-none bg-transparent p-0 text-left font-normal text-foreground hover:bg-transparent active:scale-100"
+				onClick={onNavigate}
+				variant="ghost"
 			>
-				<DropdownMenu>
-					<DropdownMenu.Trigger
-						aria-label="Actions"
-						className="inline-flex size-7 items-center justify-center gap-1.5 rounded-md bg-secondary p-0 font-medium text-muted-foreground opacity-70 transition-all duration-(--duration-quick) ease-(--ease-smooth) hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:pointer-events-none disabled:opacity-50 group-hover/goal-row:bg-interactive-hover group-hover/goal-row:text-foreground data-[state=open]:opacity-100"
+				<span className="h-max shrink-0 rounded border border-transparent bg-accent p-1.5 text-primary transition-colors group-hover/goal-row:bg-primary/10">
+					<GoalTypeIcon type={goal.type} />
+				</span>
+
+				<span className="min-w-0 flex-1">
+					<span className="flex items-center gap-2">
+						<span className="truncate font-medium text-sm">{goal.name}</span>
+						<span className="flex items-center gap-1">
+							<Badge
+								className="rounded px-1.5 py-0.5! text-[10px]!"
+								variant="muted"
+							>
+								{goalTypeLabel(goal.type)}
+							</Badge>
+							{!goal.isActive && (
+								<Badge
+									className="rounded px-1.5 py-0.5 text-[10px]!"
+									variant="default"
+								>
+									Paused
+								</Badge>
+							)}
+						</span>
+					</span>
+				</span>
+
+				{goal.createdAt && (
+					<span className="hidden shrink-0 text-[11px] text-muted-foreground sm:block">
+						{fromNow(goal.createdAt)}
+					</span>
+				)}
+			</Button>
+
+			<Button
+				className="h-auto shrink-0 items-center gap-1.5 self-start rounded border border-transparent bg-muted px-1.5 py-px font-mono text-[10px] hover:border-border hover:bg-primary/10"
+				onClick={copyTarget}
+				variant="ghost"
+			>
+				<span className="max-w-[7rem] truncate text-ring">
+					{formatGoalTargetDisplay(goal.target, 28)}
+				</span>
+			</Button>
+
+			<DropdownMenu>
+				<DropdownMenu.Trigger
+					aria-label="Actions"
+					className="inline-flex size-7 shrink-0 items-center justify-center gap-1.5 rounded-md bg-secondary p-0 font-medium text-muted-foreground opacity-70 transition-all duration-(--duration-quick) ease-(--ease-smooth) hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:pointer-events-none disabled:opacity-50 group-hover/goal-row:bg-interactive-hover group-hover/goal-row:text-foreground data-[state=open]:opacity-100"
+				>
+					<DotsThreeIcon className="size-4" weight="bold" />
+				</DropdownMenu.Trigger>
+				<DropdownMenu.Content align="end" className="w-40">
+					<DropdownMenu.Item className="gap-2" onClick={copyTarget}>
+						<CopyIcon className="size-4" weight="duotone" />
+						Copy
+					</DropdownMenu.Item>
+					<DropdownMenu.Separator />
+					<DropdownMenu.Item className="gap-2" onClick={onEdit}>
+						<PencilSimpleIcon className="size-4" weight="duotone" />
+						Edit
+					</DropdownMenu.Item>
+					<DropdownMenu.Separator />
+					<DropdownMenu.Item
+						className="gap-2"
+						onClick={onDelete}
+						variant="destructive"
 					>
-						<DotsThreeIcon className="size-4" weight="bold" />
-					</DropdownMenu.Trigger>
-					<DropdownMenu.Content align="end" className="w-40">
-						<DropdownMenu.Item className="gap-2" onClick={copyTarget}>
-							<CopyIcon className="size-4" weight="duotone" />
-							Copy
-						</DropdownMenu.Item>
-						<DropdownMenu.Separator />
-						<DropdownMenu.Item className="gap-2" onClick={onEdit}>
-							<PencilSimpleIcon className="size-4" weight="duotone" />
-							Edit
-						</DropdownMenu.Item>
-						<DropdownMenu.Separator />
-						<DropdownMenu.Item
-							className="gap-2"
-							onClick={onDelete}
-							variant="destructive"
-						>
-							<TrashIcon className="size-4" weight="duotone" />
-							Delete
-						</DropdownMenu.Item>
-					</DropdownMenu.Content>
-				</DropdownMenu>
-			</div>
+						<TrashIcon className="size-4" weight="duotone" />
+						Delete
+					</DropdownMenu.Item>
+				</DropdownMenu.Content>
+			</DropdownMenu>
 		</div>
 	);
 }
@@ -202,7 +187,7 @@ export function GoalsListRenderer({ title, goals, className }: GoalsListProps) {
 	const websiteId = params.id as string;
 
 	const [dialogOpen, setDialogOpen] = useState(false);
-	const [editingGoal, setEditingGoal] = useState<GoalItem | null>(null);
+	const [editingGoalId, setEditingGoalId] = useState<string | null>(null);
 	const [deletingId, setDeletingId] = useState<string | null>(null);
 
 	const {
@@ -214,27 +199,29 @@ export function GoalsListRenderer({ title, goals, className }: GoalsListProps) {
 		isDeleting,
 	} = useGoals(websiteId);
 
+	const editingGoalQuery = useGoal(editingGoalId ?? "", !!editingGoalId);
+
 	const openCreate = useCallback(() => {
-		setEditingGoal(null);
+		setEditingGoalId(null);
 		setDialogOpen(true);
 	}, []);
 
 	const openEdit = useCallback((goal: GoalItem) => {
-		setEditingGoal(goal);
+		setEditingGoalId(goal.id);
 		setDialogOpen(true);
 	}, []);
 
 	const closeDialog = useCallback(() => {
 		setDialogOpen(false);
-		setEditingGoal(null);
+		setEditingGoalId(null);
 	}, []);
 
 	const handleSave = useCallback(
 		async (data: Goal | Omit<CreateGoalData, "websiteId">) => {
 			try {
-				if (editingGoal) {
+				if (editingGoalId) {
 					await updateGoal({
-						goalId: editingGoal.id,
+						goalId: editingGoalId,
 						updates: data as Partial<CreateGoalData>,
 					});
 				} else {
@@ -246,11 +233,11 @@ export function GoalsListRenderer({ title, goals, className }: GoalsListProps) {
 				closeDialog();
 			} catch {
 				toast.error(
-					editingGoal ? "Failed to update goal" : "Failed to create goal"
+					editingGoalId ? "Failed to update goal" : "Failed to create goal"
 				);
 			}
 		},
-		[editingGoal, createGoal, updateGoal, websiteId, closeDialog]
+		[editingGoalId, createGoal, updateGoal, websiteId, closeDialog]
 	);
 
 	const confirmDelete = useCallback(async () => {
@@ -265,26 +252,8 @@ export function GoalsListRenderer({ title, goals, className }: GoalsListProps) {
 		}
 	}, [deletingId, deleteGoal]);
 
-	// Convert GoalItem to Goal for the dialog
-	const goalForDialog: Goal | null = editingGoal
-		? {
-				id: editingGoal.id,
-				websiteId,
-				name: editingGoal.name,
-				description: editingGoal.description ?? null,
-				type: editingGoal.type,
-				target: editingGoal.target,
-				filters: [],
-				isActive: editingGoal.isActive,
-				ignoreHistoricData: false,
-				createdAt: editingGoal.createdAt
-					? new Date(editingGoal.createdAt)
-					: new Date(),
-				updatedAt: new Date(),
-				createdBy: "",
-				deletedAt: null,
-			}
-		: null;
+	const goalForDialog: Goal | null = (editingGoalQuery.data as Goal) ?? null;
+	const dialogReady = !(editingGoalId && editingGoalQuery.isLoading);
 
 	if (goals.length === 0) {
 		return (
@@ -371,8 +340,8 @@ export function GoalsListRenderer({ title, goals, className }: GoalsListProps) {
 
 			<EditGoalDialog
 				goal={goalForDialog}
-				isOpen={dialogOpen}
-				isSaving={editingGoal ? isUpdating : isCreating}
+				isOpen={dialogOpen && dialogReady}
+				isSaving={editingGoalId ? isUpdating : isCreating}
 				onClose={closeDialog}
 				onSave={handleSave}
 			/>

@@ -1,6 +1,6 @@
 "use client";
 
-import type { DateRange } from "@databuddy/shared/types/analytics";
+import type { DateRange } from "@/types/analytics";
 import type { ReactNode } from "react";
 import { useChartPreferences } from "@/hooks/use-chart-preferences";
 import { cn } from "@/lib/utils";

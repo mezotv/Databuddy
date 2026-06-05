@@ -7,24 +7,35 @@ import {
 	hasKeyScope,
 	isApiKeyPresent,
 } from "@databuddy/api-keys/resolve";
-import { and, db, eq, isNull } from "@databuddy/db";
-import { links, member, uptimeSchedules, websites } from "@databuddy/db/schema";
+import { db } from "@databuddy/db";
+import { readBooleanEnv } from "@databuddy/env/boolean";
 import { ratelimit } from "@databuddy/redis/rate-limit";
-import { filterOptions } from "@databuddy/shared/lists/filters";
-import type { CustomQueryRequest } from "@databuddy/shared/types/custom-query";
+import {
+	getBillingOwner,
+	getOrganizationOwnerId,
+} from "@databuddy/rpc/billing";
+import {
+	type GatedFeatureId,
+	GATED_FEATURES,
+	isFeatureAvailable,
+} from "@databuddy/shared/types/features";
+import type { CustomQueryRequest } from "@databuddy/ai/query/custom-query-types";
+import { compileQuery, executeBatch } from "@databuddy/ai/query";
+import {
+	canReadQueryTypesPublicly,
+	QueryBuilders,
+} from "@databuddy/ai/query/builders";
+import { executeCustomQuery } from "@databuddy/ai/query/custom-query-builder";
+import {
+	isNormalizedQueryDate,
+	normalizeClickHouseDateTime,
+} from "@databuddy/ai/query/date-utils";
+import type { Filter, QueryRequest } from "@databuddy/ai/query/types";
 import { Elysia, t } from "elysia";
 import { getAccessibleWebsites } from "../lib/accessible-websites";
 import { resolveDatePreset } from "../lib/date-presets";
 import { mergeWideEvent } from "../lib/tracing";
 import { getCachedWebsiteDomain, getWebsiteDomain } from "../lib/website-utils";
-import { compileQuery, executeBatch } from "../query";
-import { QueryBuilders } from "../query/builders";
-import { executeCustomQuery } from "../query/custom-query-builder";
-import {
-	isNormalizedQueryDate,
-	normalizeClickHouseDateTime,
-} from "../query/date-utils";
-import type { Filter, QueryRequest } from "../query/types";
 import {
 	CompileRequestSchema,
 	type CompileRequestType,
@@ -33,6 +44,71 @@ import {
 	type DynamicQueryRequestType,
 } from "../schemas/query-schemas";
 
+const parsedPerWebsiteQueryConcurrency = Number(
+	process.env.PER_WEBSITE_QUERY_CONCURRENCY ?? 8
+);
+const PER_WEBSITE_QUERY_CONCURRENCY = Number.isFinite(
+	parsedPerWebsiteQueryConcurrency
+)
+	? Math.max(1, parsedPerWebsiteQueryConcurrency)
+	: 8;
+
+interface KeyedSemaphore {
+	active: number;
+	queue: Array<() => void>;
+}
+
+const websiteSemaphores = new Map<string, KeyedSemaphore>();
+
+async function runPerWebsite<T>(key: string, fn: () => Promise<T>): Promise<T> {
+	let sem = websiteSemaphores.get(key);
+	if (!sem) {
+		sem = { active: 0, queue: [] };
+		websiteSemaphores.set(key, sem);
+	}
+	while (sem.active >= PER_WEBSITE_QUERY_CONCURRENCY) {
+		await new Promise<void>((resolve) => {
+			(sem as KeyedSemaphore).queue.push(resolve);
+		});
+	}
+	sem.active++;
+	try {
+		return await fn();
+	} finally {
+		sem.active--;
+		const next = sem.queue.shift();
+		if (next) {
+			next();
+		} else if (sem.active === 0 && sem.queue.length === 0) {
+			websiteSemaphores.delete(key);
+		}
+	}
+}
+
+const DEFAULT_ALLOWED_FILTERS = [
+	"path",
+	"query_string",
+	"referrer",
+	"country",
+	"region",
+	"city",
+	"timezone",
+	"language",
+	"device_type",
+	"browser_name",
+	"os_name",
+	"utm_source",
+	"utm_medium",
+	"utm_campaign",
+	"provider",
+	"model",
+	"type",
+	"finish_reason",
+	"error_name",
+	"http_status",
+	"user_id",
+	"trace_id",
+] as const;
 const MAX_HOURLY_DAYS = 30;
 const MS_PER_DAY = 86_400_000;
 
@@ -44,6 +120,11 @@ interface ValidationError {
 	field: string;
 	message: string;
 	suggestion?: string;
+}
+
+interface ResolvedDateRange {
+	endDate?: string;
+	startDate?: string;
 }
 
 function findClosestMatch(input: string, options: string[]): string | null {
@@ -89,65 +170,121 @@ function validateQueryRequest(
 ):
 	| { valid: true; startDate: string; endDate: string }
 	| { valid: false; errors: ValidationError[] } {
-	const errors: ValidationError[] = [];
+	const errors = validateQueryParameters(request.parameters);
+	const dateRange = validateDateRange(request, timezone);
+	const { startDate, endDate } = dateRange;
+	errors.push(...dateRange.errors);
+	errors.push(
+		...validateRequiredDateFields(startDate, endDate, Boolean(request.preset))
+	);
+	errors.push(...validateParsedDateFields(request, { startDate, endDate }));
+	errors.push(...validatePaginationFields(request));
+
+	if (errors.length > 0) {
+		return { valid: false, errors };
+	}
+
+	return {
+		valid: true,
+		startDate: startDate as string,
+		endDate: endDate as string,
+	};
+}
+
+function validateQueryParameters(
+	parameters: DynamicQueryRequestType["parameters"]
+): ValidationError[] {
+	if (!parameters || parameters.length === 0) {
+		return [
+			{
+				field: "parameters",
+				message: "At least one parameter is required",
+			},
+		];
+	}
+
 	const queryTypes = Object.keys(QueryBuilders);
-
-	if (!request.parameters || request.parameters.length === 0) {
-		errors.push({
-			field: "parameters",
-			message: "At least one parameter is required",
-		});
-	} else {
-		for (let i = 0; i < request.parameters.length; i++) {
-			const param = request.parameters[i];
-			const name = typeof param === "string" ? param : param?.name;
-			if (name && !QueryBuilders[name]) {
-				const suggestion = findClosestMatch(name, queryTypes);
-				errors.push({
-					field: `parameters[${i}]`,
-					message: `Unknown query type: ${name}`,
-					suggestion: suggestion ? `Did you mean '${suggestion}'?` : undefined,
-				});
-			}
+	return parameters.flatMap((param, index) => {
+		const name = typeof param === "string" ? param : param?.name;
+		if (!(name && !QueryBuilders[name])) {
+			return [];
 		}
+
+		const suggestion = findClosestMatch(name, queryTypes);
+		return [
+			{
+				field: `parameters[${index}]`,
+				message: `Unknown query type: ${name}`,
+				suggestion: suggestion ? `Did you mean '${suggestion}'?` : undefined,
+			},
+		];
+	});
+}
+
+function validateDateRange(
+	request: DynamicQueryRequestType,
+	timezone: string
+): ResolvedDateRange & { errors: ValidationError[] } {
+	const dates = getExplicitDateRange(request);
+	if (!request.preset) {
+		return { ...dates, errors: [] };
 	}
 
-	let startDate = request.startDate
-		? normalizeDate(request.startDate)
-		: undefined;
-	let endDate = request.endDate ? normalizeDate(request.endDate) : undefined;
-
-	if (request.preset) {
-		if (DatePresets[request.preset]) {
-			const resolved = resolveDatePreset(request.preset, timezone);
-			startDate = resolved.startDate;
-			endDate = resolved.endDate;
-		} else {
-			const validPresets = Object.keys(DatePresets);
-			const suggestion = findClosestMatch(request.preset, validPresets);
-			errors.push({
-				field: "preset",
-				message: `Invalid date preset: ${request.preset}`,
-				suggestion: suggestion
-					? `Did you mean '${suggestion}'? Valid presets: ${validPresets.join(", ")}`
-					: `Valid presets: ${validPresets.join(", ")}`,
-			});
-		}
+	if (DatePresets[request.preset]) {
+		return { ...resolveDatePreset(request.preset, timezone), errors: [] };
 	}
 
-	if (!(startDate || request.preset)) {
+	return { ...dates, errors: [buildInvalidPresetError(request.preset)] };
+}
+
+function getExplicitDateRange(
+	request: DynamicQueryRequestType
+): ResolvedDateRange {
+	return {
+		startDate: request.startDate ? normalizeDate(request.startDate) : undefined,
+		endDate: request.endDate ? normalizeDate(request.endDate) : undefined,
+	};
+}
+
+function buildInvalidPresetError(preset: string): ValidationError {
+	const validPresets = Object.keys(DatePresets);
+	const suggestion = findClosestMatch(preset, validPresets);
+
+	return {
+		field: "preset",
+		message: `Invalid date preset: ${preset}`,
+		suggestion: suggestion
+			? `Did you mean '${suggestion}'? Valid presets: ${validPresets.join(", ")}`
+			: `Valid presets: ${validPresets.join(", ")}`,
+	};
+}
+
+function validateRequiredDateFields(
+	startDate: string | undefined,
+	endDate: string | undefined,
+	hasPreset: boolean
+): ValidationError[] {
+	const errors: ValidationError[] = [];
+	if (!(startDate || hasPreset)) {
 		errors.push({
 			field: "startDate",
 			message: "Either startDate or preset is required",
 		});
 	}
-	if (!(endDate || request.preset)) {
+	if (!(endDate || hasPreset)) {
 		errors.push({
 			field: "endDate",
 			message: "Either endDate or preset is required",
 		});
 	}
+	return errors;
+}
 
+function validateParsedDateFields(
+	request: DynamicQueryRequestType,
+	{ startDate, endDate }: ResolvedDateRange
+): ValidationError[] {
+	const errors: ValidationError[] = [];
 	if (startDate && !isNormalizedQueryDate(startDate)) {
 		errors.push({
 			field: "startDate",
@@ -160,37 +297,23 @@ function validateQueryRequest(
 			message: `Invalid date: ${request.endDate}. Could not parse as a valid date`,
 		});
 	}
+	return errors;
+}
 
-	if (request.limit !== undefined) {
-		if (request.limit < 1) {
-			errors.push({
-				field: "limit",
-				message: "Limit must be at least 1",
-			});
-		} else if (request.limit > 10_000) {
-			errors.push({
-				field: "limit",
-				message: "Limit cannot exceed 10000",
-			});
-		}
+function validatePaginationFields(
+	request: DynamicQueryRequestType
+): ValidationError[] {
+	const errors: ValidationError[] = [];
+	if (request.limit !== undefined && request.limit < 1) {
+		errors.push({ field: "limit", message: "Limit must be at least 1" });
 	}
-
+	if (request.limit !== undefined && request.limit > 10_000) {
+		errors.push({ field: "limit", message: "Limit cannot exceed 10000" });
+	}
 	if (request.page !== undefined && request.page < 1) {
-		errors.push({
-			field: "page",
-			message: "Page must be at least 1",
-		});
+		errors.push({ field: "page", message: "Page must be at least 1" });
 	}
-
-	if (errors.length > 0) {
-		return { valid: false, errors };
-	}
-
-	return {
-		valid: true,
-		startDate: startDate as string,
-		endDate: endDate as string,
-	};
+	return errors;
 }
 
 function generateRequestId(): string {
@@ -233,21 +356,37 @@ function createAuthFailedResponse(requestId: string): Response {
 	);
 }
 
+function clientIpForQuery(request: Request): string {
+	return (
+		request.headers.get("cf-connecting-ip") ||
+		request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+		request.headers.get("x-real-ip") ||
+		"unknown"
+	);
+}
+
 async function enforceQueryRateLimit(
 	ctx: AuthContext,
 	endpoint: "compile" | "execute" | "custom",
 	limit: number,
-	requestId: string
+	requestId: string,
+	request: Request
 ): Promise<Response | null> {
+	if (readBooleanEnv("DATABUDDY_E2E_MODE")) {
+		return null;
+	}
+
 	const principal = ctx.apiKey
 		? `apikey:${ctx.apiKey.id}`
 		: ctx.user
 			? `user:${ctx.user.id}`
-			: null;
-	if (!principal) {
-		return null;
-	}
-	const rl = await ratelimit(`query:${endpoint}:${principal}`, limit, 60);
+			: `anon:${clientIpForQuery(request)}`;
+	const effectiveLimit = ctx.isAuthenticated ? limit : Math.min(limit, 60);
+	const rl = await ratelimit(
+		`query:${endpoint}:${principal}`,
+		effectiveLimit,
+		60
+	);
 	if (rl.success) {
 		return null;
 	}
@@ -310,271 +449,279 @@ function createValidationErrorResponse(
 	);
 }
 
-async function getWebsiteOwnerId(websiteId: string): Promise<string | null> {
-	const website = await db.query.websites.findFirst({
-		where: eq(websites.id, websiteId),
-		columns: {
-			organizationId: true,
-		},
+async function getOrganizationWebsiteIds(
+	organizationId: string
+): Promise<string[]> {
+	const websites = await db.query.websites.findMany({
+		where: { organizationId, deletedAt: { isNull: true } },
+		columns: { id: true },
 	});
 
-	if (!website) {
+	return websites.map((website) => website.id);
+}
+
+const FEATURE_GATED_QUERY_TYPES: Record<string, GatedFeatureId> = {
+	recent_errors: GATED_FEATURES.ERROR_TRACKING,
+	error_types: GATED_FEATURES.ERROR_TRACKING,
+	errors_by_page: GATED_FEATURES.ERROR_TRACKING,
+	error_summary: GATED_FEATURES.ERROR_TRACKING,
+	error_chart_data: GATED_FEATURES.ERROR_TRACKING,
+	error_trends: GATED_FEATURES.ERROR_TRACKING,
+	error_frequency: GATED_FEATURES.ERROR_TRACKING,
+	errors_by_type: GATED_FEATURES.ERROR_TRACKING,
+};
+
+async function enforceFeatureGatesForQueryTypes(
+	queryTypes: string[],
+	website: { organizationId: string | null }
+): Promise<{ error: string; feature: GatedFeatureId } | null> {
+	const required = new Set<GatedFeatureId>();
+	for (const type of queryTypes) {
+		const feature = FEATURE_GATED_QUERY_TYPES[type];
+		if (feature) {
+			required.add(feature);
+		}
+	}
+	if (required.size === 0) {
 		return null;
 	}
 
-	return website.organizationId ?? null;
+	const ownerId = website.organizationId
+		? await getOrganizationOwnerId(website.organizationId)
+		: null;
+	if (!ownerId) {
+		return null;
+	}
+	const billing = await getBillingOwner(ownerId, website.organizationId);
+	for (const feature of required) {
+		if (!isFeatureAvailable(billing.planId, feature)) {
+			return { error: "This feature is not available on the plan", feature };
+		}
+	}
+	return null;
 }
 
-function verifyWebsiteAccess(
+function extractQueryTypes(
+	body: DynamicQueryRequestType | DynamicQueryRequestType[]
+): string[] {
+	const requests = Array.isArray(body) ? body : [body];
+	return requests.flatMap((req) =>
+		req.parameters.map((p) => (typeof p === "string" ? p : p.name))
+	);
+}
+
+async function verifyWebsiteAccess(
 	ctx: AuthContext,
-	websiteId: string
+	websiteId: string,
+	queryTypes: string[] = []
 ): Promise<boolean> {
-	return (async () => {
-		mergeWideEvent({ access_check_type: "website", website_id: websiteId });
+	mergeWideEvent({ access_check_type: "website", website_id: websiteId });
 
-		const website = await db.query.websites.findFirst({
-			where: eq(websites.id, websiteId),
-			columns: {
-				id: true,
-				isPublic: true,
-				organizationId: true,
-			},
+	const website = await db.query.websites.findFirst({
+		where: { id: websiteId },
+		columns: { id: true, isPublic: true, organizationId: true },
+	});
+
+	if (!website) {
+		mergeWideEvent({ access_result: "not_found" });
+		return false;
+	}
+
+	if (website.isPublic && canReadQueryTypesPublicly(queryTypes)) {
+		mergeWideEvent({ access_result: "public_query" });
+		return true;
+	}
+
+	if (!ctx.isAuthenticated) {
+		mergeWideEvent({
+			access_result: website.isPublic
+				? "public_overview_only"
+				: "unauthenticated",
 		});
+		return false;
+	}
 
-		if (!website) {
-			mergeWideEvent({ access_result: "not_found" });
-			return false;
-		}
+	if (!website.organizationId) {
+		mergeWideEvent({ access_result: "no_organization" });
+		return false;
+	}
 
-		if (website.isPublic) {
-			mergeWideEvent({ access_result: "public" });
-			return true;
-		}
-
-		if (!ctx.isAuthenticated) {
-			mergeWideEvent({ access_result: "unauthenticated" });
-			return false;
-		}
-
-		if (!website.organizationId) {
-			mergeWideEvent({ access_result: "no_organization" });
-			return false;
-		}
-
-		if (ctx.apiKey) {
-			if (hasGlobalAccess(ctx.apiKey)) {
-				if (ctx.apiKey.organizationId) {
-					const granted = website.organizationId === ctx.apiKey.organizationId;
-					mergeWideEvent({
-						access_result: granted ? "api_key_global" : "api_key_denied",
-					});
-					return granted;
-				}
+	if (ctx.apiKey) {
+		if (hasGlobalAccess(ctx.apiKey)) {
+			if (!ctx.apiKey.organizationId) {
 				mergeWideEvent({ access_result: "api_key_no_org" });
 				return false;
 			}
-
-			const accessibleIds = getAccessibleWebsiteIds(ctx.apiKey);
-			const granted = accessibleIds.includes(websiteId);
+			const granted = website.organizationId === ctx.apiKey.organizationId;
 			mergeWideEvent({
-				access_result: granted ? "api_key_scoped" : "api_key_denied",
+				access_result: granted ? "api_key_global" : "api_key_denied",
 			});
 			return granted;
 		}
 
-		if (ctx.user) {
-			const membership = await db.query.member.findFirst({
-				where: and(
-					eq(member.userId, ctx.user.id),
-					eq(member.organizationId, website.organizationId)
-				),
-				columns: {
-					id: true,
-				},
-			});
+		const granted = getAccessibleWebsiteIds(ctx.apiKey).includes(websiteId);
+		mergeWideEvent({
+			access_result: granted ? "api_key_scoped" : "api_key_denied",
+		});
+		return granted;
+	}
 
-			mergeWideEvent({
-				access_result: membership ? "member" : "not_member",
-			});
-			return !!membership;
-		}
+	if (ctx.user) {
+		const membership = await db.query.member.findFirst({
+			where: { userId: ctx.user.id, organizationId: website.organizationId },
+			columns: { id: true },
+		});
+		mergeWideEvent({ access_result: membership ? "member" : "not_member" });
+		return !!membership;
+	}
 
-		mergeWideEvent({ access_result: "denied" });
-		return false;
-	})();
+	mergeWideEvent({ access_result: "denied" });
+	return false;
 }
 
-function verifyScheduleAccess(
+async function verifyScheduleAccess(
 	ctx: AuthContext,
 	scheduleId: string
 ): Promise<boolean> {
-	return (async () => {
-		mergeWideEvent({ access_check_type: "schedule", schedule_id: scheduleId });
+	mergeWideEvent({ access_check_type: "schedule", schedule_id: scheduleId });
 
-		const schedule = await db.query.uptimeSchedules.findFirst({
-			where: eq(uptimeSchedules.id, scheduleId),
-			columns: {
-				id: true,
-				organizationId: true,
-				websiteId: true,
-			},
-		});
+	const schedule = await db.query.uptimeSchedules.findFirst({
+		where: { id: scheduleId },
+		columns: { id: true, organizationId: true, websiteId: true },
+	});
 
-		if (!schedule) {
-			mergeWideEvent({ access_result: "not_found" });
-			return false;
-		}
-
-		if (!ctx.isAuthenticated) {
-			mergeWideEvent({ access_result: "unauthenticated" });
-			return false;
-		}
-
-		if (ctx.user) {
-			const membership = await db.query.member.findFirst({
-				where: and(
-					eq(member.userId, ctx.user.id),
-					eq(member.organizationId, schedule.organizationId)
-				),
-				columns: { id: true },
-			});
-			mergeWideEvent({
-				access_result: membership ? "member" : "not_member",
-			});
-			return !!membership;
-		}
-
-		if (ctx.apiKey) {
-			const orgMatch =
-				hasKeyScope(ctx.apiKey, "read:data") &&
-				ctx.apiKey.organizationId === schedule.organizationId;
-			if (!orgMatch) {
-				mergeWideEvent({ access_result: "api_key_denied" });
-				return false;
-			}
-			if (hasGlobalAccess(ctx.apiKey)) {
-				mergeWideEvent({ access_result: "api_key_match" });
-				return true;
-			}
-			const accessible = getAccessibleWebsiteIds(ctx.apiKey);
-			const granted =
-				!!schedule.websiteId && accessible.includes(schedule.websiteId);
-			mergeWideEvent({
-				access_result: granted
-					? "api_key_website_match"
-					: "api_key_website_denied",
-			});
-			return granted;
-		}
-
-		mergeWideEvent({ access_result: "denied" });
+	if (!schedule) {
+		mergeWideEvent({ access_result: "not_found" });
 		return false;
-	})();
+	}
+
+	if (!ctx.isAuthenticated) {
+		mergeWideEvent({ access_result: "unauthenticated" });
+		return false;
+	}
+
+	if (ctx.user) {
+		const membership = await db.query.member.findFirst({
+			where: { userId: ctx.user.id, organizationId: schedule.organizationId },
+			columns: { id: true },
+		});
+		mergeWideEvent({ access_result: membership ? "member" : "not_member" });
+		return !!membership;
+	}
+
+	if (ctx.apiKey) {
+		const orgMatch =
+			hasKeyScope(ctx.apiKey, "read:data") &&
+			ctx.apiKey.organizationId === schedule.organizationId;
+		if (!orgMatch) {
+			mergeWideEvent({ access_result: "api_key_denied" });
+			return false;
+		}
+		if (hasGlobalAccess(ctx.apiKey)) {
+			mergeWideEvent({ access_result: "api_key_match" });
+			return true;
+		}
+		const granted =
+			!!schedule.websiteId &&
+			getAccessibleWebsiteIds(ctx.apiKey).includes(schedule.websiteId);
+		mergeWideEvent({
+			access_result: granted
+				? "api_key_website_match"
+				: "api_key_website_denied",
+		});
+		return granted;
+	}
+
+	mergeWideEvent({ access_result: "denied" });
+	return false;
 }
 
-function verifyLinkAccess(ctx: AuthContext, linkId: string): Promise<boolean> {
-	return (async () => {
-		mergeWideEvent({ access_check_type: "link", link_id: linkId });
+async function verifyLinkAccess(
+	ctx: AuthContext,
+	linkId: string
+): Promise<boolean> {
+	mergeWideEvent({ access_check_type: "link", link_id: linkId });
 
-		const link = await db.query.links.findFirst({
-			where: and(eq(links.id, linkId), isNull(links.deletedAt)),
-			columns: {
-				id: true,
-				organizationId: true,
-				createdBy: true,
-			},
-		});
+	const link = await db.query.links.findFirst({
+		where: { id: linkId, deletedAt: { isNull: true } },
+		columns: { id: true, organizationId: true, createdBy: true },
+	});
 
-		if (!link) {
-			mergeWideEvent({ access_result: "not_found" });
-			return false;
-		}
-
-		if (!ctx.isAuthenticated) {
-			mergeWideEvent({ access_result: "unauthenticated" });
-			return false;
-		}
-
-		if (ctx.user && link.organizationId) {
-			const membership = await db.query.member.findFirst({
-				where: and(
-					eq(member.userId, ctx.user.id),
-					eq(member.organizationId, link.organizationId)
-				),
-				columns: { id: true },
-			});
-			mergeWideEvent({
-				access_result: membership ? "member" : "not_member",
-			});
-			return !!membership;
-		}
-
-		if (ctx.user) {
-			const granted = link.createdBy === ctx.user.id;
-			mergeWideEvent({
-				access_result: granted ? "owner" : "not_owner",
-			});
-			return granted;
-		}
-
-		if (ctx.apiKey) {
-			const granted =
-				hasKeyScope(ctx.apiKey, "read:data") &&
-				ctx.apiKey.organizationId === link.organizationId &&
-				hasGlobalAccess(ctx.apiKey);
-			mergeWideEvent({
-				access_result: granted ? "api_key_match" : "api_key_denied",
-			});
-			return granted;
-		}
-
-		mergeWideEvent({ access_result: "denied" });
+	if (!link) {
+		mergeWideEvent({ access_result: "not_found" });
 		return false;
-	})();
+	}
+
+	if (!ctx.isAuthenticated) {
+		mergeWideEvent({ access_result: "unauthenticated" });
+		return false;
+	}
+
+	if (ctx.user && link.organizationId) {
+		const membership = await db.query.member.findFirst({
+			where: { userId: ctx.user.id, organizationId: link.organizationId },
+			columns: { id: true },
+		});
+		mergeWideEvent({ access_result: membership ? "member" : "not_member" });
+		return !!membership;
+	}
+
+	if (ctx.user) {
+		const granted = link.createdBy === ctx.user.id;
+		mergeWideEvent({ access_result: granted ? "owner" : "not_owner" });
+		return granted;
+	}
+
+	if (ctx.apiKey) {
+		const granted =
+			hasKeyScope(ctx.apiKey, "read:data") &&
+			ctx.apiKey.organizationId === link.organizationId &&
+			hasGlobalAccess(ctx.apiKey);
+		mergeWideEvent({
+			access_result: granted ? "api_key_match" : "api_key_denied",
+		});
+		return granted;
+	}
+
+	mergeWideEvent({ access_result: "denied" });
+	return false;
 }
 
-function verifyOrganizationAccess(
+async function verifyOrganizationAccess(
 	ctx: AuthContext,
 	organizationId: string
 ): Promise<boolean> {
-	return (async () => {
-		mergeWideEvent({
-			access_check_type: "organization",
-			organization_id: organizationId,
-		});
+	mergeWideEvent({
+		access_check_type: "organization",
+		organization_id: organizationId,
+	});
 
-		if (!ctx.isAuthenticated) {
-			mergeWideEvent({ access_result: "unauthenticated" });
-			return false;
-		}
-
-		if (ctx.user) {
-			const membership = await db.query.member.findFirst({
-				where: and(
-					eq(member.userId, ctx.user.id),
-					eq(member.organizationId, organizationId)
-				),
-				columns: { id: true },
-			});
-			mergeWideEvent({
-				access_result: membership ? "member" : "not_member",
-			});
-			return !!membership;
-		}
-
-		if (ctx.apiKey) {
-			const granted =
-				hasKeyScope(ctx.apiKey, "read:data") &&
-				ctx.apiKey.organizationId === organizationId;
-			mergeWideEvent({
-				access_result: granted ? "api_key_match" : "api_key_denied",
-			});
-			return granted;
-		}
-
-		mergeWideEvent({ access_result: "denied" });
+	if (!ctx.isAuthenticated) {
+		mergeWideEvent({ access_result: "unauthenticated" });
 		return false;
-	})();
+	}
+
+	if (ctx.user) {
+		const membership = await db.query.member.findFirst({
+			where: { userId: ctx.user.id, organizationId },
+			columns: { id: true },
+		});
+		mergeWideEvent({ access_result: membership ? "member" : "not_member" });
+		return !!membership;
+	}
+
+	if (ctx.apiKey) {
+		const granted =
+			hasKeyScope(ctx.apiKey, "read:data") &&
+			ctx.apiKey.organizationId === organizationId;
+		mergeWideEvent({
+			access_result: granted ? "api_key_match" : "api_key_denied",
+		});
+		return granted;
+	}
+
+	mergeWideEvent({ access_result: "denied" });
+	return false;
 }
 
 async function resolveProjectAccess(
@@ -584,9 +731,10 @@ async function resolveProjectAccess(
 		scheduleId?: string;
 		linkId?: string;
 		organizationId?: string;
+		queryTypes?: string[];
 	}
 ): Promise<ProjectAccessResult> {
-	const { websiteId, scheduleId, linkId, organizationId } = options;
+	const { websiteId, scheduleId, linkId, organizationId, queryTypes } = options;
 
 	if (linkId) {
 		const hasAccess = await verifyLinkAccess(ctx, linkId);
@@ -619,7 +767,7 @@ async function resolveProjectAccess(
 	}
 
 	if (websiteId) {
-		const hasAccess = await verifyWebsiteAccess(ctx, websiteId);
+		const hasAccess = await verifyWebsiteAccess(ctx, websiteId, queryTypes);
 		if (!hasAccess) {
 			return {
 				success: false,
@@ -736,7 +884,8 @@ async function executeDynamicQuery(
 	projectId: string,
 	projectType: ProjectType,
 	timezone: string,
-	domainCache?: Record<string, string | null>
+	domainCache?: Record<string, string | null>,
+	scope?: { organizationWebsiteIds?: string[] }
 ): Promise<{
 	queryId: string;
 	data: QueryResult[];
@@ -751,22 +900,14 @@ async function executeDynamicQuery(
 	const { startDate: from, endDate: to } = request;
 
 	const domain =
-		domainCache?.[projectId] ??
-		(await getWebsiteDomain(projectId).catch(() => null));
-
-	// LLM queries are scoped by owner (organizationId/userId), not website_id.
-	const hasLlmQueries = request.parameters.some((param) => {
-		const name = typeof param === "string" ? param : param.name;
-		return name.startsWith("llm_");
-	});
-
-	let ownerId: string | null = null;
-	if (hasLlmQueries) {
-		ownerId =
-			projectType === "organization"
-				? projectId
-				: await getWebsiteOwnerId(projectId);
-	}
+		projectType === "website"
+			? (domainCache?.[projectId] ??
+				(await getWebsiteDomain(projectId).catch(() => null)))
+			: null;
+	const organizationWebsiteIds =
+		projectType === "organization"
+			? (scope?.organizationWebsiteIds ?? [])
+			: undefined;
 
 	// Org-level custom_events queries: builder scans by owner_id (= organizationId
 	// set at ingestion) via primary key instead of matching website_id.
@@ -798,18 +939,11 @@ async function executeDynamicQuery(
 			return { id, error: "Invalid parameter date range" };
 		}
 
-		const isLlmQuery = name.startsWith("llm_");
-		const isCustomEventsQuery = name.startsWith("custom_event");
-		const effectiveProjectId = isLlmQuery ? ownerId : projectId;
-
-		const hasRequiredFields = effectiveProjectId && paramFrom && paramTo;
+		const hasRequiredFields = projectId && paramFrom && paramTo;
 		if (!hasRequiredFields) {
 			return {
 				id,
-				error:
-					isLlmQuery && !ownerId
-						? "Could not resolve owner for LLM query"
-						: "Missing resource identifier, start_date, or end_date",
+				error: "Missing resource identifier, start_date, or end_date",
 			};
 		}
 
@@ -821,7 +955,7 @@ async function executeDynamicQuery(
 		return {
 			id,
 			request: {
-				projectId: effectiveProjectId,
+				projectId,
 				type: name,
 				from: paramFrom,
 				to: paramTo,
@@ -834,8 +968,9 @@ async function executeDynamicQuery(
 				limit: request.limit || 100,
 				offset: request.page ? (request.page - 1) * (request.limit || 100) : 0,
 				timezone,
-				organizationWebsiteIds:
-					isCustomEventsQuery && isOrgCustomEvents ? [] : undefined,
+				organizationWebsiteIds: isOrgCustomEvents
+					? (organizationWebsiteIds ?? [])
+					: organizationWebsiteIds,
 				orderBy,
 			},
 		};
@@ -861,9 +996,11 @@ async function executeDynamicQuery(
 	}
 
 	if (validParameters.length > 0) {
-		const results = await executeBatch(
-			validParameters.map((v) => v.request),
-			{ websiteDomain: domain, timezone }
+		const results = await runPerWebsite(projectId, () =>
+			executeBatch(
+				validParameters.map((v) => v.request),
+				{ websiteDomain: domain, timezone }
+			)
 		);
 
 		for (let i = 0; i < validParameters.length; i++) {
@@ -974,10 +1111,10 @@ export const query = new Elysia({ prefix: "/v1/query" })
 			Object.entries(QueryBuilders).map(([key, cfg]) => [
 				key,
 				{
-					allowedFilters:
-						cfg.allowedFilters ?? filterOptions.map((f) => f.value),
+					allowedFilters: cfg.allowedFilters ?? DEFAULT_ALLOWED_FILTERS,
 					customizable: cfg.customizable,
 					defaultLimit: cfg.limit,
+					publicAccess: cfg.publicAccess === true,
 					...(includeMeta && { meta: cfg.meta }),
 				},
 			])
@@ -997,23 +1134,27 @@ export const query = new Elysia({ prefix: "/v1/query" })
 			body,
 			query: q,
 			auth: ctx,
+			request,
 		}: {
 			body: CompileRequestType;
 			query: { website_id?: string; timezone?: string };
 			auth: AuthContext;
+			request: Request;
 		}) => {
 			const requestId = generateRequestId();
 			const rateLimited = await enforceQueryRateLimit(
 				ctx,
 				"compile",
 				300,
-				requestId
+				requestId,
+				request
 			);
 			if (rateLimited) {
 				return rateLimited;
 			}
 			const accessResult = await resolveProjectAccess(ctx, {
 				websiteId: q.website_id,
+				queryTypes: body.type ? [String(body.type)] : [],
 			});
 
 			if (!accessResult.success) {
@@ -1052,6 +1193,7 @@ export const query = new Elysia({ prefix: "/v1/query" })
 			body,
 			query: q,
 			auth: ctx,
+			request,
 		}: {
 			body: DynamicQueryRequestType | DynamicQueryRequestType[];
 			query: {
@@ -1062,6 +1204,7 @@ export const query = new Elysia({ prefix: "/v1/query" })
 				timezone?: string;
 			};
 			auth: AuthContext;
+			request: Request;
 		}) =>
 			(async () => {
 				const requestId = generateRequestId();
@@ -1070,7 +1213,8 @@ export const query = new Elysia({ prefix: "/v1/query" })
 					ctx,
 					"execute",
 					120,
-					requestId
+					requestId,
+					request
 				);
 				if (rateLimited) {
 					return rateLimited;
@@ -1081,6 +1225,7 @@ export const query = new Elysia({ prefix: "/v1/query" })
 					scheduleId: q.schedule_id,
 					linkId: q.link_id,
 					organizationId: q.organization_id,
+					queryTypes: extractQueryTypes(body),
 				});
 
 				if (!accessResult.success) {
@@ -1092,10 +1237,43 @@ export const query = new Elysia({ prefix: "/v1/query" })
 					);
 				}
 
+				if (accessResult.projectType === "website" && q.website_id) {
+					const queryTypes = extractQueryTypes(body);
+					const website = await db.query.websites.findFirst({
+						where: { id: q.website_id },
+						columns: { organizationId: true },
+					});
+					if (website) {
+						const gateFail = await enforceFeatureGatesForQueryTypes(
+							queryTypes,
+							website
+						);
+						if (gateFail) {
+							return createErrorResponse(
+								gateFail.error,
+								"FEATURE_UNAVAILABLE",
+								402,
+								requestId
+							);
+						}
+					}
+				}
+
+				const organizationWebsiteIds =
+					accessResult.projectType === "organization"
+						? await getOrganizationWebsiteIds(accessResult.projectId)
+						: undefined;
+				const organizationScope = organizationWebsiteIds
+					? { organizationWebsiteIds }
+					: undefined;
+
 				const isBatch = Array.isArray(body);
 				mergeWideEvent({
 					query_is_batch: isBatch,
 					query_count: isBatch ? body.length : 1,
+					...(organizationWebsiteIds && {
+						query_organization_website_count: organizationWebsiteIds.length,
+					}),
 				});
 
 				if (isBatch) {
@@ -1142,7 +1320,8 @@ export const query = new Elysia({ prefix: "/v1/query" })
 								accessResult.projectId,
 								accessResult.projectType,
 								timezone,
-								cache
+								cache,
+								organizationScope
 							).catch((e) => ({
 								queryId: req.id,
 								data: [
@@ -1184,7 +1363,9 @@ export const query = new Elysia({ prefix: "/v1/query" })
 						resolvedBody,
 						accessResult.projectId,
 						accessResult.projectType,
-						timezone
+						timezone,
+						undefined,
+						organizationScope
 					)),
 				};
 			})(),
@@ -1202,10 +1383,12 @@ export const query = new Elysia({ prefix: "/v1/query" })
 			body,
 			query: q,
 			auth: ctx,
+			request,
 		}: {
 			body: CustomQueryRequest;
 			query: { website_id?: string };
 			auth: AuthContext;
+			request: Request;
 		}) =>
 			(async () => {
 				const requestId = generateRequestId();
@@ -1213,7 +1396,8 @@ export const query = new Elysia({ prefix: "/v1/query" })
 					ctx,
 					"custom",
 					60,
-					requestId
+					requestId,
+					request
 				);
 				if (rateLimited) {
 					return rateLimited;

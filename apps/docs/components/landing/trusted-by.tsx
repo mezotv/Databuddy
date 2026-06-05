@@ -211,7 +211,9 @@ export function TrustedBy() {
 						<img
 							alt={team.name}
 							className="size-4 rounded-sm opacity-50 invert sm:size-5"
+							height={20}
 							src={team.icon}
+							width={20}
 						/>
 						<span className="font-medium text-xs sm:text-sm">{team.name}</span>
 					</div>

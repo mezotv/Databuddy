@@ -17,8 +17,12 @@ import {
 } from "@/components/ai-elements/markdown-table";
 import { ButtonGroup, ButtonGroupText } from "@/components/ui/button-group";
 import { cn } from "@/lib/utils";
-import { PaperclipIcon, XIcon } from "@phosphor-icons/react/dist/ssr";
-import { CaretLeftIcon, CaretRightIcon } from "@databuddy/ui/icons";
+import {
+	CaretLeftIcon,
+	CaretRightIcon,
+	PaperclipIcon,
+	XMarkIcon as XIcon,
+} from "@databuddy/ui/icons";
 import { Button, Tooltip } from "@databuddy/ui";
 
 export type MessageProps = HTMLAttributes<HTMLDivElement> & {

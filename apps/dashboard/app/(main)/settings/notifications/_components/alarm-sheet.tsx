@@ -8,8 +8,8 @@ import { toast } from "sonner";
 import { z } from "zod";
 import { useOrganizationsContext } from "@/components/providers/organizations-provider";
 import { orpc } from "@/lib/orpc";
-import { SlackLogoIcon } from "@phosphor-icons/react/dist/ssr";
 import {
+	BellIcon as SlackLogoIcon,
 	EnvelopeSimpleIcon,
 	GlobeSimpleIcon,
 	PlusIcon,
@@ -351,12 +351,12 @@ export function AlarmSheet({
 							<div className="space-y-2">
 								{fields.map((field, index) => {
 									const destType = form.watch(
-										`destinations.${index}.type`,
+										`destinations.${index}.type`
 									) as DestType;
 									const channel = CHANNELS[destType];
 									const Icon = channel?.icon ?? GlobeSimpleIcon;
 									const identifier = form.watch(
-										`destinations.${index}.identifier`,
+										`destinations.${index}.identifier`
 									);
 
 									return (
@@ -420,12 +420,12 @@ export function AlarmSheet({
 													{destType === "webhook" && (
 														<WebhookHeaders
 															config={form.watch(
-																`destinations.${index}.config`,
+																`destinations.${index}.config`
 															)}
 															onChange={(headers) =>
 																form.setValue(`destinations.${index}.config`, {
 																	...form.getValues(
-																		`destinations.${index}.config`,
+																		`destinations.${index}.config`
 																	),
 																	headers,
 																})

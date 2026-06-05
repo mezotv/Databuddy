@@ -16,14 +16,12 @@ export interface FaqItem {
 
 interface FaqSectionProps {
 	className?: string;
-	eyebrow?: string;
 	items: FaqItem[];
 	subtitle?: string;
 	title?: string;
 }
 
 export function FaqSection({
-	eyebrow,
 	title = "Frequently asked questions.",
 	subtitle,
 	items,

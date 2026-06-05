@@ -1,23 +1,19 @@
 import { and, desc, eq, isNull, withTransaction } from "@databuddy/db";
 import { flagsToTargetGroups, targetGroups } from "@databuddy/db/schema";
-import {
-	createDrizzleCache,
-	invalidateCacheablePattern,
-	invalidateCacheableWithArgs,
-	redis,
-} from "@databuddy/redis";
+import { createDrizzleCache, redis } from "@databuddy/redis";
 import { userRuleSchema } from "@databuddy/shared/flags";
-import { GATED_FEATURES } from "@databuddy/shared/types/features";
 import { randomUUIDv7 } from "bun";
 import { z } from "zod";
 import { rpcError } from "../errors";
 import { publicProcedure, trackedProcedure } from "../orpc";
 import {
-	isFullyAuthorized,
+	hasApiKeyOrgAccess,
+	withFlagsWrite,
 	withWebsiteRead,
 	withWorkspace,
 } from "../procedures/with-workspace";
-import { requireFeatureWithLimit } from "../types/billing";
+import { invalidateFlagEvaluationCaches } from "../utils/flags";
+import { scopedCacheKey } from "../utils/scoped-cache-key";
 
 const targetGroupsCache = createDrizzleCache({
 	redis,
@@ -70,15 +66,10 @@ interface TargetGroupWithRules {
 	[key: string]: unknown;
 }
 
-/**
- * Sanitizes target group data for unauthorized/demo users by removing sensitive targeting information.
- * Only keeps aggregate numbers like rule count.
- */
 function sanitizeGroupForDemo<T extends TargetGroupWithRules>(group: T): T {
 	return {
 		...group,
-		rules:
-			Array.isArray(group.rules) && group.rules.length > 0 ? [] : group.rules,
+		rules: Array.isArray(group.rules) ? [] : group.rules,
 	};
 }
 
@@ -94,20 +85,26 @@ export const targetGroupsRouter = {
 		})
 		.input(listSchema)
 		.output(z.array(targetGroupOutputSchema))
-		.handler(({ context, input }) => {
-			const cacheKey = `list:website:${input.websiteId}`;
+		.handler(async ({ context, input }) => {
+			const workspace = await withWorkspace(context, {
+				websiteId: input.websiteId,
+				permissions: ["read"],
+				allowPublicAccess: true,
+			});
+
+			const sanitize =
+				workspace.tier === "demo" && !hasApiKeyOrgAccess(workspace, context);
 
 			return targetGroupsCache.withCache({
-				key: cacheKey,
+				key: scopedCacheKey(
+					"list",
+					workspace,
+					`website:${input.websiteId}`,
+					`sanitize:${sanitize}`
+				),
 				ttl: CACHE_DURATION,
 				tables: ["target_groups"],
 				queryFn: async () => {
-					await withWorkspace(context, {
-						websiteId: input.websiteId,
-						permissions: ["read"],
-						allowPublicAccess: true,
-					});
-
 					const groupsList = await context.db
 						.select()
 						.from(targetGroups)
@@ -119,18 +116,7 @@ export const targetGroupsRouter = {
 						)
 						.orderBy(desc(targetGroups.createdAt));
 
-					// Check if user is fully authorized
-					const isAuthorized = await isFullyAuthorized(
-						context,
-						input.websiteId
-					);
-
-					// Sanitize data for unauthorized/demo users
-					if (!isAuthorized) {
-						return groupsList.map((group) => sanitizeGroupForDemo(group));
-					}
-
-					return groupsList;
+					return sanitize ? groupsList.map(sanitizeGroupForDemo) : groupsList;
 				},
 			});
 		}),
@@ -148,39 +134,32 @@ export const targetGroupsRouter = {
 		.output(targetGroupOutputSchema)
 		.use(withWebsiteRead)
 		.handler(async ({ context, input }) => {
-			const cacheKey = `byId:${input.id}:website:${input.websiteId}`;
+			const { workspace } = context;
+			const sanitize =
+				workspace.tier === "demo" && !hasApiKeyOrgAccess(workspace, context);
 
 			return await targetGroupsCache.withCache({
-				key: cacheKey,
+				key: scopedCacheKey(
+					"byId",
+					workspace,
+					`website:${input.websiteId}`,
+					`id:${input.id}`,
+					`sanitize:${sanitize}`
+				),
 				ttl: CACHE_DURATION,
 				tables: ["target_groups"],
 				queryFn: async () => {
-					const result = await context.db
-						.select()
-						.from(targetGroups)
-						.where(
-							and(
-								eq(targetGroups.id, input.id),
-								eq(targetGroups.websiteId, input.websiteId),
-								isNull(targetGroups.deletedAt)
-							)
-						)
-						.limit(1);
-
-					if (result.length === 0) {
+					const row = await context.db.query.targetGroups.findFirst({
+						where: {
+							id: input.id,
+							websiteId: input.websiteId,
+							deletedAt: { isNull: true },
+						},
+					});
+					if (!row) {
 						throw rpcError.notFound("Target group", input.id);
 					}
-
-					const isAuthorized = await isFullyAuthorized(
-						context,
-						input.websiteId
-					);
-
-					if (!isAuthorized) {
-						return sanitizeGroupForDemo(result[0]);
-					}
-
-					return result[0];
+					return sanitize ? sanitizeGroupForDemo(row) : row;
 				},
 			});
 		}),
@@ -197,28 +176,12 @@ export const targetGroupsRouter = {
 		.input(createSchema)
 		.output(targetGroupOutputSchema)
 		.handler(async ({ context, input }) => {
-			const workspace = await withWorkspace(context, {
+			const workspace = await withFlagsWrite(context, {
 				websiteId: input.websiteId,
 				permissions: ["update"],
 			});
 
 			const createdBy = await workspace.getCreatedBy();
-
-			const existingGroups = await context.db
-				.select({ id: targetGroups.id })
-				.from(targetGroups)
-				.where(
-					and(
-						eq(targetGroups.websiteId, input.websiteId),
-						isNull(targetGroups.deletedAt)
-					)
-				);
-
-			requireFeatureWithLimit(
-				workspace.plan,
-				GATED_FEATURES.TARGET_GROUPS,
-				existingGroups.length
-			);
 
 			const [newGroup] = await context.db
 				.insert(targetGroups)
@@ -264,7 +227,7 @@ export const targetGroupsRouter = {
 
 			const group = existingGroup[0];
 
-			await withWorkspace(context, {
+			await withFlagsWrite(context, {
 				websiteId: group.websiteId,
 				permissions: ["update"],
 			});
@@ -280,9 +243,7 @@ export const targetGroupsRouter = {
 				.returning();
 
 			await targetGroupsCache.invalidateByTables(["target_groups"]);
-
-			await invalidateCacheablePattern(`cacheable:flag:*${group.websiteId}*`);
-			await invalidateCacheableWithArgs("flags-client", [group.websiteId]);
+			await invalidateFlagEvaluationCaches(group.websiteId);
 
 			return updatedGroup;
 		}),
@@ -313,7 +274,7 @@ export const targetGroupsRouter = {
 
 			const group = existingGroup[0];
 
-			await withWorkspace(context, {
+			await withFlagsWrite(context, {
 				websiteId: group.websiteId,
 				permissions: ["delete"],
 			});
@@ -333,7 +294,7 @@ export const targetGroupsRouter = {
 
 			await targetGroupsCache.invalidateByTables(["target_groups"]);
 			await flagsCache.invalidateByTables(["flags", "flags_to_target_groups"]);
-			await invalidateCacheableWithArgs("flags-client", [group.websiteId]);
+			await invalidateFlagEvaluationCaches(group.websiteId);
 
 			return { success: true };
 		}),

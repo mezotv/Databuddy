@@ -79,6 +79,7 @@ export default async function ComparisonPage({ params }: PageProps) {
 				</>
 			}
 			migrationSection={migrationSection}
+			pageType="compare"
 			pageUrl={pageUrl}
 			pricingTiers={pricingTiers}
 			structuredDescription={seo.description}

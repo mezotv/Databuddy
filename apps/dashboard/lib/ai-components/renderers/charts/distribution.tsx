@@ -6,7 +6,6 @@ import { Chart } from "@/components/ui/composables/chart";
 import { Card, Skeleton } from "@databuddy/ui";
 import { ChartPieIcon } from "@databuddy/ui/icons";
 import {
-	chartLegendPillClassName,
 	chartLegendPillDotClassName,
 	chartLegendPillLabelClassName,
 	chartLegendPillRowClassName,
@@ -70,7 +69,12 @@ export function DistributionRenderer({
 	const isSkeleton = data.length === 0;
 
 	return (
-		<Card className={cn("gap-0 overflow-hidden border-0 bg-secondary p-1", className)}>
+		<Card
+			className={cn(
+				"gap-0 overflow-hidden border-0 bg-secondary p-1",
+				className
+			)}
+		>
 			<div className="flex flex-col gap-1">
 				<div className="flex items-center gap-2.5 rounded-md bg-background px-2.5 py-2">
 					<div className="flex size-6 items-center justify-center rounded bg-accent">
@@ -89,12 +93,19 @@ export function DistributionRenderer({
 						)}
 					>
 						{data.map((item, idx) => (
-							<div className={"flex items-center gap-1.5 rounded-md bg-secondary px-2 py-1"} key={item.name}>
+							<div
+								className={
+									"flex items-center gap-1.5 rounded-md bg-secondary px-2 py-1"
+								}
+								key={item.name}
+							>
 								<div
 									className={chartLegendPillDotClassName}
 									style={{ backgroundColor: chartSeriesColorAtIndex(idx) }}
 								/>
-								<span className={chartLegendPillLabelClassName}>{item.name}</span>
+								<span className={chartLegendPillLabelClassName}>
+									{item.name}
+								</span>
 							</div>
 						))}
 					</div>
@@ -105,7 +116,9 @@ export function DistributionRenderer({
 						{isSkeleton ? (
 							<Skeleton className="mx-auto size-[160px] rounded-full" />
 						) : (
-							<ChartErrorBoundary fallbackClassName={`h-[${PLOT_HEIGHT}px] w-full`}>
+							<ChartErrorBoundary
+								fallbackClassName={`h-[${PLOT_HEIGHT}px] w-full`}
+							>
 								<ResponsiveContainer height={PLOT_HEIGHT} width="100%">
 									<PieChart>
 										<Pie

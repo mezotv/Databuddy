@@ -299,6 +299,9 @@ function NavGroup({
 		if (item.production === false && process.env.NODE_ENV === "production") {
 			return false;
 		}
+		if (item.hideFromSidebar) {
+			return false;
+		}
 		if (item.hideFromDemo && isDemo) {
 			return false;
 		}

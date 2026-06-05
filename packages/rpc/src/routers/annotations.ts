@@ -1,19 +1,47 @@
 import { and, desc, eq, isNull, or, type SQL } from "@databuddy/db";
 import { annotations } from "@databuddy/db/schema";
-import { createDrizzleCache, redis } from "@databuddy/redis";
+import {
+	createDrizzleCache,
+	invalidateAgentContextSnapshotsForWebsite,
+	redis,
+} from "@databuddy/redis";
 import { randomUUIDv7 } from "bun";
 import { z } from "zod";
 import { rpcError } from "../errors";
 import { setTrackProperties } from "../middleware/track-mutation";
-import { publicProcedure, trackedProcedure } from "../orpc";
-import { isFullyAuthorized, withWorkspace } from "../procedures/with-workspace";
-import { getCacheAuthContext } from "../utils/cache-keys";
+import { type Context, publicProcedure, trackedProcedure } from "../orpc";
+import {
+	hasApiKeyOrgAccess,
+	type Workspace,
+	withWorkspace,
+} from "../procedures/with-workspace";
+import { scopedCacheKey } from "../utils/scoped-cache-key";
+
+function annotationViewerSlot(workspace: Workspace, context: Context): string {
+	if (workspace.tier === "authed") {
+		return "authed";
+	}
+	if (context.apiKey) {
+		return `apikey:${context.apiKey.id}`;
+	}
+	if (context.user) {
+		return `user:${context.user.id}`;
+	}
+	return "anon";
+}
 
 const annotationsCache = createDrizzleCache({
 	redis,
 	namespace: "annotations",
 });
 const CACHE_TTL = 300;
+
+async function invalidateAnnotationCaches(websiteId: string): Promise<void> {
+	await Promise.all([
+		annotationsCache.invalidateByTables(["annotations"]),
+		invalidateAgentContextSnapshotsForWebsite(websiteId),
+	]);
+}
 
 const chartContextSchema = z.object({
 	dateRange: z.object({
@@ -74,21 +102,25 @@ export const annotationsRouter = {
 		)
 		.output(z.array(annotationOutputSchema))
 		.handler(async ({ context, input }) => {
-			const authContext = await getCacheAuthContext(context, {
+			const workspace = await withWorkspace(context, {
 				websiteId: input.websiteId,
+				permissions: ["read"],
+				allowPublicAccess: true,
 			});
 
+			const viewerSlot = annotationViewerSlot(workspace, context);
+
 			return annotationsCache.withCache({
-				key: `annotations:list:${input.websiteId}:${input.chartType}:${authContext}`,
+				key: scopedCacheKey(
+					"list",
+					workspace,
+					`website:${input.websiteId}`,
+					`viewer:${viewerSlot}`,
+					`chart:${input.chartType}`
+				),
 				ttl: CACHE_TTL,
 				tables: ["annotations"],
-				queryFn: async () => {
-					const workspace = await withWorkspace(context, {
-						websiteId: input.websiteId,
-						permissions: ["read"],
-						allowPublicAccess: true,
-					});
-
+				queryFn: () => {
 					const baseConditions = [
 						eq(annotations.websiteId, input.websiteId),
 						eq(annotations.chartType, input.chartType),
@@ -96,20 +128,16 @@ export const annotationsRouter = {
 					];
 
 					let visibilityCondition: SQL<unknown> | undefined;
-					if (workspace.isPublicAccess) {
-						if (context.user) {
-							// Show public annotations OR user's own annotations
-							visibilityCondition = or(
-								eq(annotations.isPublic, true),
-								eq(annotations.createdBy, context.user.id)
-							);
-						} else if (context.apiKey) {
-							// API key has org access, show all
-							visibilityCondition = undefined;
-						} else {
-							// Unauthenticated users on public websites only see public annotations
-							visibilityCondition = eq(annotations.isPublic, true);
-						}
+					if (
+						workspace.tier === "demo" &&
+						!hasApiKeyOrgAccess(workspace, context)
+					) {
+						visibilityCondition = context.user
+							? or(
+									eq(annotations.isPublic, true),
+									eq(annotations.createdBy, context.user.id)
+								)
+							: eq(annotations.isPublic, true);
 					}
 
 					const whereCondition = visibilityCondition
@@ -138,7 +166,7 @@ export const annotationsRouter = {
 		.output(annotationOutputSchema)
 		.handler(async ({ context, input, errors }) => {
 			const annotationRow = await context.db.query.annotations.findFirst({
-				where: and(eq(annotations.id, input.id), isNull(annotations.deletedAt)),
+				where: { id: input.id, deletedAt: { isNull: true } },
 				columns: {
 					websiteId: true,
 					isPublic: true,
@@ -159,12 +187,12 @@ export const annotationsRouter = {
 				allowPublicAccess: true,
 			});
 
-			if (workspace.isPublicAccess && !context.apiKey) {
-				const canSee =
-					context.user !== undefined &&
-					annotationRow.createdBy === context.user.id;
-				const isPublicAnnotation = annotationRow.isPublic;
-				if (!(canSee || isPublicAnnotation)) {
+			if (
+				workspace.tier === "demo" &&
+				!hasApiKeyOrgAccess(workspace, context)
+			) {
+				const isOwner = context.user?.id === annotationRow.createdBy;
+				if (!(isOwner || annotationRow.isPublic)) {
 					throw errors.NOT_FOUND({
 						message: "Annotation not found",
 						data: { resourceType: "annotation", resourceId: input.id },
@@ -172,39 +200,26 @@ export const annotationsRouter = {
 				}
 			}
 
-			const authContext = await getCacheAuthContext(context, {
-				websiteId: annotationRow.websiteId,
-			});
-
 			return annotationsCache.withCache({
-				key: `annotations:byId:${input.id}:${authContext}`,
+				key: scopedCacheKey(
+					"byId",
+					workspace,
+					`website:${annotationRow.websiteId}`,
+					`id:${input.id}`
+				),
 				ttl: CACHE_TTL,
 				tables: ["annotations"],
 				queryFn: async () => {
-					const result = await context.db
-						.select()
-						.from(annotations)
-						.where(
-							and(eq(annotations.id, input.id), isNull(annotations.deletedAt))
-						)
-						.limit(1);
-
-					if (result.length === 0) {
+					const row = await context.db.query.annotations.findFirst({
+						where: { id: input.id, deletedAt: { isNull: true } },
+					});
+					if (!row) {
 						throw errors.NOT_FOUND({
 							message: "Annotation not found",
 							data: { resourceType: "annotation", resourceId: input.id },
 						});
 					}
-
-					const annotationResult = result[0];
-					if (!annotationResult) {
-						throw errors.NOT_FOUND({
-							message: "Annotation not found",
-							data: { resourceType: "annotation", resourceId: input.id },
-						});
-					}
-
-					return annotationResult;
+					return row;
 				},
 			});
 		}),
@@ -263,7 +278,7 @@ export const annotationsRouter = {
 				})
 				.returning();
 
-			await annotationsCache.invalidateByTables(["annotations"]);
+			await invalidateAnnotationCaches(input.websiteId);
 
 			return newAnnotation;
 		}),
@@ -299,24 +314,14 @@ export const annotationsRouter = {
 			}
 
 			const annotation = existingAnnotation[0];
+			if (!annotation) {
+				throw rpcError.notFound("annotation", input.id);
+			}
 
 			await withWorkspace(context, {
 				websiteId: annotation.websiteId,
 				permissions: ["update"],
 			});
-
-			const isWebsiteOwner = await isFullyAuthorized(
-				context,
-				annotation.websiteId
-			);
-
-			if (
-				!isWebsiteOwner &&
-				context.user &&
-				annotation.createdBy !== context.user.id
-			) {
-				throw rpcError.forbidden("You can only update your own annotations");
-			}
 
 			const updateData: {
 				text?: string;
@@ -344,7 +349,7 @@ export const annotationsRouter = {
 				.where(eq(annotations.id, input.id))
 				.returning();
 
-			await annotationsCache.invalidateByTables(["annotations"]);
+			await invalidateAnnotationCaches(annotation.websiteId);
 
 			return updatedAnnotation;
 		}),
@@ -372,31 +377,21 @@ export const annotationsRouter = {
 			}
 
 			const annotation = existingAnnotation[0];
+			if (!annotation) {
+				throw rpcError.notFound("annotation", input.id);
+			}
 
 			await withWorkspace(context, {
 				websiteId: annotation.websiteId,
 				permissions: ["delete"],
 			});
 
-			const isWebsiteOwner = await isFullyAuthorized(
-				context,
-				annotation.websiteId
-			);
-
-			if (
-				!isWebsiteOwner &&
-				context.user &&
-				annotation.createdBy !== context.user.id
-			) {
-				throw rpcError.forbidden("You can only delete your own annotations");
-			}
-
 			await context.db
 				.update(annotations)
 				.set({ deletedAt: new Date() })
 				.where(eq(annotations.id, input.id));
 
-			await annotationsCache.invalidateByTables(["annotations"]);
+			await invalidateAnnotationCaches(annotation.websiteId);
 
 			return { success: true };
 		}),

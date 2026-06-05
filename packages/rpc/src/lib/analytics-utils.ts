@@ -1,5 +1,6 @@
 import { chQuery } from "@databuddy/db/clickhouse";
-import { referrers } from "@databuddy/shared/lists/referrers";
+import { goalFunnelFilterFieldSet } from "@databuddy/shared/analytics-filters";
+import { parseReferrer } from "@databuddy/shared/utils/referrer";
 
 export interface AnalyticsStep {
 	name: string;
@@ -102,8 +103,6 @@ interface ReferrerRow {
 // Helpers
 const ESCAPE_BACKSLASH_REGEX = /\\/g;
 const ESCAPE_LIKE_WILDCARDS_REGEX = /[%_]/g;
-const WWW_PREFIX_REGEX = /^www\./;
-
 const escapeClickhouseString = (value: string): string =>
 	value
 		.replace(ESCAPE_BACKSLASH_REGEX, "\\\\")
@@ -142,43 +141,7 @@ function toFiniteNumber(value: unknown, fallback = 0): number {
 	return Number.isFinite(n) ? n : fallback;
 }
 
-const parseReferrer = (ref: string): ParsedReferrer => {
-	if (!ref || ref === "Direct" || ref.toLowerCase() === "(direct)") {
-		return { name: "Direct", type: "direct", domain: "" };
-	}
-
-	try {
-		const url = new URL(ref.includes("://") ? ref : `https://${ref}`);
-		const host = url.hostname.replace(WWW_PREFIX_REGEX, "").toLowerCase();
-		const known = referrers[url.hostname] || referrers[host];
-
-		return known
-			? { name: known.name, type: known.type, domain: host }
-			: { name: host, type: "referrer", domain: host };
-	} catch {
-		return { name: ref, type: "referrer", domain: "" };
-	}
-};
-
-// Filter building
-const FIELDS = new Set([
-	"event_name",
-	"path",
-	"referrer",
-	"user_agent",
-	"country",
-	"city",
-	"device_type",
-	"browser_name",
-	"os_name",
-	"screen_resolution",
-	"language",
-	"utm_source",
-	"utm_medium",
-	"utm_campaign",
-	"utm_term",
-	"utm_content",
-]);
+const FIELDS = goalFunnelFilterFieldSet;
 
 const OPS = new Set([
 	"equals",
@@ -217,13 +180,13 @@ const buildFilterSQL = (
 			continue;
 		}
 
-		// Preserve historical behavior: if value is an array, treat it as IN/NOT IN.
-		// (Even if the operator isn't "in", the old code defaulted to NOT IN.)
 		if (Array.isArray(value)) {
+			if (value.length === 0) {
+				continue;
+			}
+			const negate = operator === "not_in" || operator === "not_equals";
 			params[key] = value;
-			parts.push(
-				`${field} ${operator === "in" ? "IN" : "NOT IN"} {${key}:Array(String)}`
-			);
+			parts.push(`${field} ${negate ? "NOT IN" : "IN"} {${key}:Array(String)}`);
 			continue;
 		}
 
@@ -231,37 +194,29 @@ const buildFilterSQL = (
 			continue;
 		}
 
-		switch (operator) {
-			default: {
-				const escaped = escapeClickhouseString(value);
-
-				if (operator === "contains" || operator === "not_contains") {
-					params[key] = `%${escaped}%`;
-					parts.push(
-						`${field} ${operator === "contains" ? "LIKE" : "NOT LIKE"} {${key}:String}`
-					);
-					break;
-				}
-
-				if (operator === "starts_with") {
-					params[key] = `${escaped}%`;
-					parts.push(`${field} LIKE {${key}:String}`);
-					break;
-				}
-
-				if (operator === "ends_with") {
-					params[key] = `%${escaped}`;
-					parts.push(`${field} LIKE {${key}:String}`);
-					break;
-				}
-
-				params[key] = escaped;
-				parts.push(
-					`${field} ${operator === "equals" ? "=" : "!="} {${key}:String}`
-				);
-				break;
-			}
+		if (operator === "contains" || operator === "not_contains") {
+			params[key] = `%${escapeClickhouseString(value)}%`;
+			parts.push(
+				`${field} ${operator === "contains" ? "LIKE" : "NOT LIKE"} {${key}:String}`
+			);
+			continue;
 		}
+
+		if (operator === "starts_with") {
+			params[key] = `${escapeClickhouseString(value)}%`;
+			parts.push(`${field} LIKE {${key}:String}`);
+			continue;
+		}
+
+		if (operator === "ends_with") {
+			params[key] = `%${escapeClickhouseString(value)}`;
+			parts.push(`${field} LIKE {${key}:String}`);
+			continue;
+		}
+
+		const isNegative = operator === "not_equals" || operator === "not_in";
+		params[key] = value;
+		parts.push(`${field} ${isNegative ? "!=" : "="} {${key}:String}`);
 	}
 
 	return parts.length > 0 ? ` AND ${parts.join(" AND ")}` : "";

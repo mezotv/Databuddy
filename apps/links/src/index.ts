@@ -1,9 +1,12 @@
+import { db, shutdownPostgres, sql } from "@databuddy/db";
+import { redis } from "@databuddy/redis";
 import { Elysia, redirect } from "elysia";
 import { initLogger, log } from "evlog";
 import { evlog } from "evlog/elysia";
 import { drain, enrich, flushDrain } from "./lib/logging";
 import { disconnectProducer } from "./lib/producer";
 import { redirectRoute } from "./routes/redirect";
+import { preloadGeoDatabase } from "./utils/geo";
 
 initLogger({
 	env: { service: "links" },
@@ -14,14 +17,15 @@ initLogger({
 	},
 });
 
+const rootRedirectUrl =
+	process.env.LINKS_ROOT_REDIRECT_URL || "https://databuddy.cc";
+preloadGeoDatabase();
+
 const app = new Elysia()
 	.use(evlog({ enrich }))
-	.get("/", () => redirect("https://databuddy.cc", 302))
+	.get("/", () => redirect(rootRedirectUrl, 302))
 	.get("/health", () => Response.json({ status: "ok" }))
 	.get("/health/status", async () => {
-		const { db, sql } = await import("@databuddy/db");
-		const { redis } = await import("@databuddy/redis");
-
 		async function ping(probe: () => Promise<void>) {
 			const start = performance.now();
 			try {
@@ -60,6 +64,12 @@ async function shutdown(signal: string) {
 		shutdownRedis().catch((error) =>
 			log.error({
 				lifecycle: "redisShutdown",
+				error_message: error instanceof Error ? error.message : String(error),
+			})
+		),
+		shutdownPostgres().catch((error) =>
+			log.error({
+				lifecycle: "postgresShutdown",
 				error_message: error instanceof Error ? error.message : String(error),
 			})
 		),

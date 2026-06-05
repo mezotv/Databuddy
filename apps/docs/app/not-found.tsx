@@ -1,4 +1,4 @@
-import { HouseIcon } from "@phosphor-icons/react/ssr";
+import { HouseIcon } from "@databuddy/ui/icons";
 import Link from "next/link";
 import { SciFiButton } from "@/components/landing/scifi-btn";
 import Section from "@/components/landing/section";

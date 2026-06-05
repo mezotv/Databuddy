@@ -12,7 +12,9 @@ const KafkaProducer = Context.Service<Producer>("KafkaProducer");
 
 const connectProducer = (): Promise<Producer> => {
 	const broker = process.env.REDPANDA_BROKER;
-	if (!broker) return Promise.reject(new Error("REDPANDA_BROKER not set"));
+	if (!broker) {
+		return Promise.reject(new Error("REDPANDA_BROKER not set"));
+	}
 
 	const username = process.env.REDPANDA_USER;
 	const password = process.env.REDPANDA_PASSWORD;
@@ -55,9 +57,9 @@ const KafkaProducerLive = Layer.effect(
 						error_step: "kafka_producer_disconnect",
 					});
 					return Effect.void;
-				}),
-			),
-	),
+				})
+			)
+	)
 );
 
 const sendEvent = (event: unknown, key?: string) =>
@@ -70,7 +72,7 @@ const sendEvent = (event: unknown, key?: string) =>
 					messages: [
 						{
 							value: JSON.stringify(event, (_k, v) =>
-								v === undefined ? null : v,
+								v === undefined ? null : v
 							),
 							key,
 						},
@@ -87,9 +89,13 @@ let singletonProducer: Producer | null = null;
 let singletonConnected = false;
 
 async function ensureProducer(): Promise<Producer | null> {
-	if (singletonConnected && singletonProducer) return singletonProducer;
+	if (singletonConnected && singletonProducer) {
+		return singletonProducer;
+	}
 
-	if (!process.env.REDPANDA_BROKER) return null;
+	if (!process.env.REDPANDA_BROKER) {
+		return null;
+	}
 
 	try {
 		singletonProducer = await connectProducer();
@@ -104,19 +110,19 @@ async function ensureProducer(): Promise<Producer | null> {
 
 export async function sendUptimeEvent(
 	event: unknown,
-	key?: string,
+	key?: string
 ): Promise<void> {
 	const p = await ensureProducer();
-	if (!p) return;
+	if (!p) {
+		return;
+	}
 
 	try {
 		await p.send({
 			topic: TOPIC,
 			messages: [
 				{
-					value: JSON.stringify(event, (_k, v) =>
-						v === undefined ? null : v,
-					),
+					value: JSON.stringify(event, (_k, v) => (v === undefined ? null : v)),
 					key,
 				},
 			],
@@ -128,7 +134,9 @@ export async function sendUptimeEvent(
 }
 
 export async function disconnectProducer(): Promise<void> {
-	if (!singletonProducer) return;
+	if (!singletonProducer) {
+		return;
+	}
 	try {
 		await singletonProducer.disconnect();
 	} catch (error) {

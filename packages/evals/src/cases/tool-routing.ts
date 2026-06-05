@@ -68,4 +68,29 @@ export const toolRoutingCases: EvalCase[] = [
 			maxLatencyMs: 300_000,
 		},
 	},
+	{
+		id: "product-usage-interesting-sessions",
+		category: "tool-routing",
+		name: "Inspect representative sessions to explain product usage patterns",
+		query:
+			"Dig into specific sessions that seem interesting, then explain how people use the product. Separate demo/tour browsing from authenticated product usage if the data supports it, and call out instrumentation issues instead of guessing.",
+		websiteId: WS,
+		expect: {
+			maxSteps: 20,
+			maxLatencyMs: 300_000,
+			toolsCalled: ["get_data"],
+			toolInputs: [
+				{
+					tool: "get_data",
+					includes: { type: "interesting_sessions" },
+				},
+			],
+			responseNotMatches: [
+				{
+					description: "must not use nonexistent pageview event name",
+					pattern: "event_name\\s*=\\s*['\"]pageview['\"]",
+				},
+			],
+		},
+	},
 ];

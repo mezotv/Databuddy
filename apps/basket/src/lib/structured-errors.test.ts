@@ -12,11 +12,6 @@ import {
 
 describe("basketErrors", () => {
 	const errorTable: [string, keyof typeof basketErrors, number][] = [
-		["llmMissingApiKey", "llmMissingApiKey", 401],
-		["llmMissingScope", "llmMissingScope", 401],
-		["llmMissingOwner", "llmMissingOwner", 400],
-		["llmBillingOwnerUnresolved", "llmBillingOwnerUnresolved", 400],
-		["llmInvalidBody", "llmInvalidBody", 400],
 		["trackPayloadTooLarge", "trackPayloadTooLarge", 413],
 		["trackInvalidBody", "trackInvalidBody", 400],
 		["trackMissingScope", "trackMissingScope", 403],
@@ -24,6 +19,7 @@ describe("basketErrors", () => {
 		["trackMissingCredentials", "trackMissingCredentials", 401],
 		["trackWebsiteNotFound", "trackWebsiteNotFound", 404],
 		["trackWebsiteNoOrganization", "trackWebsiteNoOrganization", 400],
+		["trackWebsiteScopeMismatch", "trackWebsiteScopeMismatch", 403],
 		["ingestPayloadTooLarge", "ingestPayloadTooLarge", 413],
 		["ingestMissingClientId", "ingestMissingClientId", 400],
 		["ingestInvalidClientId", "ingestInvalidClientId", 400],
@@ -37,6 +33,8 @@ describe("basketErrors", () => {
 		["ingestUnknownEventType", "ingestUnknownEventType", 400],
 		["ingestBatchNotArray", "ingestBatchNotArray", 400],
 		["ingestBatchTooLarge", "ingestBatchTooLarge", 400],
+		["billingLimitExceeded", "billingLimitExceeded", 402],
+		["billingCheckUnavailable", "billingCheckUnavailable", 503],
 	];
 
 	for (const [label, key, expectedStatus] of errorTable) {
@@ -221,13 +219,14 @@ describe("buildBasketErrorPayload", () => {
 		expect(typeof payload.error).toBe("string");
 	});
 
-	test("404 EvlogError → exposes message even in production", () => {
+	test("4xx EvlogError → exposes message even in production", () => {
 		const original = process.env.NODE_ENV;
 		process.env.NODE_ENV = "production";
 		try {
-			const err = createError({ message: "Not found", status: 404 });
+			const err = createError({ message: "Origin not authorized", status: 403 });
 			const { payload } = buildBasketErrorPayload(err);
-			expect(payload.error).toBe("Not found");
+			expect(payload.error).toBe("Origin not authorized");
+			expect(payload.message).toBe("Origin not authorized");
 		} finally {
 			process.env.NODE_ENV = original;
 		}

@@ -55,10 +55,9 @@ const NAME_OVERRIDES: Record<string, string> = {
 	"apikeys.revoke": "api_key_revoked",
 	"apikeys.rotate": "api_key_rotated",
 	"apikeys.delete": "api_key_deleted",
-	"featureInvite.generateLinks": "invite_links_generated",
-	"featureInvite.revokeLink": "invite_link_revoked",
-	"featureInvite.redeemLink": "invite_link_redeemed",
 	"organizations.updateAvatarSeed": "org_avatar_updated",
+	"organizations.updateEmailNotificationSettings":
+		"email_notifications_updated",
 	"organizations.clearExpiredInvitations": "expired_invitations_cleared",
 	"preferences.updateUserPreferences": "preferences_updated",
 	"billing.setAutoTopup": "auto_topup_set",
@@ -82,6 +81,9 @@ const VERB_MAP: Record<string, string> = {
 	rename: "renamed",
 };
 
+const TRAILING_S = /s$/;
+const TOGGLE_PREFIX = /^toggle(.+)$/;
+
 function deriveEventName(path: string): string {
 	if (NAME_OVERRIDES[path]) {
 		return NAME_OVERRIDES[path];
@@ -92,14 +94,14 @@ function deriveEventName(path: string): string {
 		return path;
 	}
 
-	const singular = toSnakeCase(router.replace(/s$/, ""));
+	const singular = toSnakeCase(router.replace(TRAILING_S, ""));
 	const verb = VERB_MAP[method];
 
 	if (verb) {
 		return `${singular}_${verb}`;
 	}
 
-	const toggleMatch = method.match(/^toggle(.+)$/);
+	const toggleMatch = method.match(TOGGLE_PREFIX);
 	if (toggleMatch) {
 		return `${singular}_toggled_${toSnakeCase(toggleMatch[1])}`;
 	}

@@ -1,12 +1,17 @@
 import { and, desc, eq, sql, withTransaction } from "@databuddy/db";
 import type { db as DbType } from "@databuddy/db";
 import { feedback, feedbackRedemptions } from "@databuddy/db/schema";
+import { ratelimit } from "@databuddy/redis/rate-limit";
 import { randomUUIDv7 } from "bun";
 import { z } from "zod";
 import { rpcError } from "../errors";
 import { logger } from "../lib/logger";
 import { setTrackProperties } from "../middleware/track-mutation";
 import { sessionProcedure, trackedSessionProcedure } from "../orpc";
+import {
+	isDefinitiveAutumnBalanceFailure,
+	updateAutumnBalance,
+} from "../utils/autumn-balance";
 import { getBillingCustomerId } from "../utils/billing";
 
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL ?? "";
@@ -21,6 +26,14 @@ const CATEGORY_LABELS: Record<string, string> = {
 	other: "Other",
 };
 
+function escapeMrkdwn(value: string): string {
+	return value
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/\|/g, "&#124;");
+}
+
 async function notifySlack(
 	title: string,
 	category: string,
@@ -30,6 +43,10 @@ async function notifySlack(
 	if (!SLACK_WEBHOOK_URL) {
 		return;
 	}
+
+	const safeTitle = escapeMrkdwn(title);
+	const safeDescription = escapeMrkdwn(description.slice(0, 500));
+	const safeEmail = escapeMrkdwn(userEmail);
 
 	const blocks = [
 		{
@@ -45,7 +62,7 @@ async function notifySlack(
 			fields: [
 				{
 					type: "mrkdwn",
-					text: `*Title:*\n${title}`,
+					text: `*Title:*\n${safeTitle}`,
 				},
 				{
 					type: "mrkdwn",
@@ -57,7 +74,7 @@ async function notifySlack(
 			type: "section",
 			text: {
 				type: "mrkdwn",
-				text: `*Description:*\n${description.slice(0, 500)}${description.length > 500 ? "..." : ""}`,
+				text: `*Description:*\n${safeDescription}${description.length > 500 ? "..." : ""}`,
 			},
 		},
 		{
@@ -65,7 +82,7 @@ async function notifySlack(
 			elements: [
 				{
 					type: "mrkdwn",
-					text: `Submitted by ${userEmail} · ${new Date().toUTCString()}`,
+					text: `Submitted by ${safeEmail} · ${new Date().toUTCString()}`,
 				},
 			],
 		},
@@ -127,6 +144,17 @@ const feedbackOutputSchema = z.object({
 	adminNotes: z.string().nullable(),
 	reviewedBy: z.string().nullable(),
 	reviewedAt: z.coerce.date().nullable(),
+	createdAt: z.coerce.date(),
+	updatedAt: z.coerce.date(),
+});
+
+const submitterFeedbackOutputSchema = z.object({
+	id: z.string(),
+	title: z.string(),
+	description: z.string(),
+	category: categoryEnum,
+	status: statusEnum,
+	creditsAwarded: z.number(),
 	createdAt: z.coerce.date(),
 	updatedAt: z.coerce.date(),
 });
@@ -194,6 +222,15 @@ export const feedbackRouter = {
 				throw rpcError.badRequest("Organization context is required");
 			}
 
+			const rl = await ratelimit(
+				`feedback:submit:${context.user.id}:${context.organizationId}`,
+				5,
+				3600
+			);
+			if (!rl.success) {
+				throw rpcError.rateLimited(rl.reset);
+			}
+
 			const [newFeedback] = await context.db
 				.insert(feedback)
 				.values({
@@ -231,7 +268,7 @@ export const feedbackRouter = {
 				})
 				.default({})
 		)
-		.output(z.array(feedbackOutputSchema))
+		.output(z.array(submitterFeedbackOutputSchema))
 		.handler(async ({ context, input }) => {
 			if (!context.organizationId) {
 				throw rpcError.badRequest("Organization context is required");
@@ -247,7 +284,16 @@ export const feedbackRouter = {
 			}
 
 			return await context.db
-				.select()
+				.select({
+					id: feedback.id,
+					title: feedback.title,
+					description: feedback.description,
+					category: feedback.category,
+					status: feedback.status,
+					creditsAwarded: feedback.creditsAwarded,
+					createdAt: feedback.createdAt,
+					updatedAt: feedback.updatedAt,
+				})
 				.from(feedback)
 				.where(and(...conditions))
 				.orderBy(desc(feedback.createdAt));
@@ -337,6 +383,10 @@ export const feedbackRouter = {
 			const redemptionId = randomUUIDv7();
 
 			await withTransaction(async (tx) => {
+				await tx.execute(
+					sql`SELECT pg_advisory_xact_lock(hashtextextended(${`feedback:${userId}:${organizationId}`}, 0))`
+				);
+
 				const balance = await computeCreditsBalance(tx, userId, organizationId);
 
 				if (balance.available < tier.creditsRequired) {
@@ -360,36 +410,26 @@ export const feedbackRouter = {
 				tier.rewardType === "agent-credits" ? "agent-credits" : "events";
 
 			try {
-				const response = await fetch(
-					"https://api.useautumn.com/v1/balances.update",
-					{
-						method: "POST",
-						headers: {
-							"Content-Type": "application/json",
-							Authorization: `Bearer ${process.env.AUTUMN_SECRET_KEY}`,
-						},
-						body: JSON.stringify({
-							customer_id: customerId,
-							feature_id: featureId,
-							add_to_balance: tier.rewardAmount,
-						}),
-					}
-				);
-
-				if (!response.ok) {
-					const body = await response.text();
-					throw new Error(`Autumn API ${response.status}: ${body}`);
-				}
+				await updateAutumnBalance({
+					amount: tier.rewardAmount,
+					customerId,
+					featureId,
+					redemptionId,
+				});
 			} catch (error) {
-				await context.db
-					.delete(feedbackRedemptions)
-					.where(eq(feedbackRedemptions.id, redemptionId))
-					.catch((deleteError) => {
-						logger.error(
-							{ deleteError, redemptionId, userId },
-							"Failed to roll back redemption after Autumn failure"
-						);
-					});
+				const definitiveFailure = isDefinitiveAutumnBalanceFailure(error);
+
+				if (definitiveFailure) {
+					await context.db
+						.delete(feedbackRedemptions)
+						.where(eq(feedbackRedemptions.id, redemptionId))
+						.catch((deleteError) => {
+							logger.error(
+								{ deleteError, redemptionId, userId },
+								"Failed to roll back redemption after definitive Autumn failure"
+							);
+						});
+				}
 
 				const errorMessage =
 					error instanceof Error ? error.message : String(error);
@@ -400,11 +440,14 @@ export const feedbackRouter = {
 						customerId,
 						tier,
 						redemptionId,
+						ambiguousAutumnUpdate: !definitiveFailure,
 					},
 					"Failed to update Autumn balance for credit redemption"
 				);
 				throw rpcError.internal(
-					"Failed to add events to your balance. Please try again."
+					definitiveFailure
+						? "Failed to add events to your balance. Please try again."
+						: "Your redemption was recorded, but we could not confirm the balance update. Please contact support before retrying."
 				);
 			}
 

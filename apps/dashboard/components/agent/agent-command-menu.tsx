@@ -11,6 +11,7 @@ import {
 	FunnelIcon,
 	LightningIcon,
 	MagnifyingGlassIcon,
+	TrashIcon,
 	WarningIcon,
 } from "@databuddy/ui/icons";
 import { Button } from "@databuddy/ui";
@@ -24,6 +25,7 @@ const COMMAND_ICONS: Record<string, NavIcon> = {
 	"/anomalies": WarningIcon,
 	"/compare": ChartBarIcon,
 	"/report": ClipboardIcon,
+	"/clear": TrashIcon,
 };
 
 function getCommandIcon(command: string) {

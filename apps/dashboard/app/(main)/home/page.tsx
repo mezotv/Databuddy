@@ -16,6 +16,8 @@ import { useSmartInsights } from "./hooks/use-smart-insights";
 import { ArrowClockwiseIcon, GlobeIcon, PlusIcon } from "@databuddy/ui/icons";
 import { Button, Card, EmptyState, Skeleton } from "@databuddy/ui";
 
+const WEBSITE_PREVIEW_LIMIT = 3;
+
 function WebsiteCardSkeleton() {
 	return (
 		<Card className="animate-pulse overflow-hidden pt-0">
@@ -90,10 +92,13 @@ export default function HomePage() {
 		]);
 	};
 
+	const websitePreview = websites.slice(0, WEBSITE_PREVIEW_LIMIT);
+	const hasMoreWebsites = websites.length > WEBSITE_PREVIEW_LIMIT;
+
 	return (
 		<div className="flex h-full flex-col">
 			<TopBar.Title>
-				<h1 className="font-semibold text-sm">Overview</h1>
+				<h1 className="font-semibold text-sm">Home</h1>
 			</TopBar.Title>
 			<TopBar.Actions>
 				<Button
@@ -168,7 +173,7 @@ export default function HomePage() {
 				<div className="space-y-4">
 					<div className="flex items-center justify-between">
 						<h2 className="font-semibold text-foreground text-sm">
-							Your Websites
+							Website Snapshot
 						</h2>
 						{websites.length > 0 && (
 							<Link
@@ -182,8 +187,8 @@ export default function HomePage() {
 
 					{isLoading && (
 						<div className="grid gap-4 sm:grid-cols-2 sm:gap-6 lg:grid-cols-3">
-							{[1, 2, 3].map((num) => (
-								<WebsiteCardSkeleton key={`skeleton-${num}`} />
+							{Array.from({ length: WEBSITE_PREVIEW_LIMIT }, (_, i) => (
+								<WebsiteCardSkeleton key={`skeleton-${i + 1}`} />
 							))}
 						</div>
 					)}
@@ -219,7 +224,7 @@ export default function HomePage() {
 							aria-live="polite"
 							className="grid gap-4 sm:grid-cols-2 sm:gap-6 lg:grid-cols-3"
 						>
-							{websites.slice(0, 6).map((website) => (
+							{websitePreview.map((website) => (
 								<WebsiteCard
 									activeUsers={activeUsers?.[website.id]}
 									chartData={chartData?.[website.id]}
@@ -231,7 +236,7 @@ export default function HomePage() {
 						</div>
 					)}
 
-					{!isLoading && websites.length > 6 && (
+					{!isLoading && hasMoreWebsites && (
 						<div className="flex justify-center pt-2">
 							<Button asChild variant="outline">
 								<Link href="/websites">

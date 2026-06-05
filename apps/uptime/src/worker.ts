@@ -1,9 +1,11 @@
 import {
 	getBullMQWorkerConnectionOptions,
+	getUptimeQueue,
 	type UptimeCheckJobData,
 	UPTIME_CHECK_JOB_NAME,
 	UPTIME_JOB_TIMEOUT_MS,
 	UPTIME_QUEUE_NAME,
+	uptimeSchedulerId,
 } from "@databuddy/redis";
 import { Worker } from "bullmq";
 import type { RequestLogger } from "evlog";
@@ -18,7 +20,12 @@ import {
 import { isHealthExtractionEnabled } from "./json-parser";
 import { sendUptimeEvent } from "./lib/producer";
 import { captureError } from "./lib/tracing";
-import { MonitorStatus, type ActionResult, type UptimeData } from "./types";
+import {
+	MonitorStatus,
+	type ActionResult,
+	type ScheduleLookupReason,
+	type UptimeData,
+} from "./types";
 import {
 	fireTransitionAlerts,
 	getPreviousMonitorStatus,
@@ -26,9 +33,22 @@ import {
 
 class ScheduleNotFound extends Data.TaggedError("ScheduleNotFound")<{
 	message: string;
+	reason: ScheduleLookupReason;
 }> {}
 
-class SchedulePaused extends Data.TaggedError("SchedulePaused")<{}> {}
+const REAPABLE_REASONS: ReadonlySet<ScheduleLookupReason> = new Set([
+	"not_found",
+	"malformed",
+]);
+
+async function defaultReapOrphanScheduler(scheduleId: string): Promise<void> {
+	const queue = getUptimeQueue();
+	await queue.removeJobScheduler(uptimeSchedulerId(scheduleId));
+}
+
+class SchedulePaused extends Data.TaggedError("SchedulePaused")<
+	Record<string, never>
+> {}
 
 class CheckFailed extends Data.TaggedError("CheckFailed")<{
 	message: string;
@@ -37,25 +57,17 @@ class CheckFailed extends Data.TaggedError("CheckFailed")<{
 export interface UptimeWorkerDeps {
 	captureError: (
 		error: unknown,
-		attributes?: Record<string, string | number | boolean>,
+		attributes?: Record<string, string | number | boolean>
 	) => void;
 	checkUptime: (
 		siteId: string,
 		url: string,
 		attempt: number,
-		options: CheckOptions,
+		options: CheckOptions
 	) => Promise<ActionResult<UptimeData>>;
 	createLogger: (
-		fields: Record<string, string | number | boolean>,
+		fields: Record<string, string | number | boolean>
 	) => RequestLogger;
-	getPreviousMonitorStatus: (
-		monitorId: string,
-	) => Promise<number | undefined>;
-	isHealthExtractionEnabled: (config: unknown) => boolean;
-	lookupSchedule: (
-		scheduleId: string,
-	) => Promise<ActionResult<ScheduleData>>;
-	sendUptimeEvent: (data: UptimeData, monitorId: string) => Promise<void>;
 	fireTransitionAlerts: (options: {
 		schedule: ScheduleData;
 		data: UptimeData;
@@ -64,6 +76,11 @@ export interface UptimeWorkerDeps {
 		transition_kind: "down" | "recovered" | null;
 		alarms_fired: number;
 	}>;
+	getPreviousMonitorStatus: (monitorId: string) => Promise<number | undefined>;
+	isHealthExtractionEnabled: (config: unknown) => boolean;
+	lookupSchedule: (scheduleId: string) => Promise<ActionResult<ScheduleData>>;
+	reapOrphanScheduler: (scheduleId: string) => Promise<void>;
+	sendUptimeEvent: (data: UptimeData, monitorId: string) => Promise<void>;
 }
 
 const uptimeWorkerDeps: UptimeWorkerDeps = {
@@ -73,9 +90,27 @@ const uptimeWorkerDeps: UptimeWorkerDeps = {
 	getPreviousMonitorStatus,
 	isHealthExtractionEnabled,
 	lookupSchedule,
+	reapOrphanScheduler: defaultReapOrphanScheduler,
 	sendUptimeEvent,
 	fireTransitionAlerts,
 };
+
+export const DEFAULT_UPTIME_WORKER_CONCURRENCY = 10_000;
+
+export function getUptimeWorkerConcurrency(
+	value = process.env.UPTIME_WORKER_CONCURRENCY
+): number {
+	if (value === undefined || value.trim() === "") {
+		return DEFAULT_UPTIME_WORKER_CONCURRENCY;
+	}
+
+	const parsed = Number.parseInt(value, 10);
+	if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+		return DEFAULT_UPTIME_WORKER_CONCURRENCY;
+	}
+
+	return parsed;
+}
 
 export interface UptimeWorkerJob {
 	attemptsMade?: number;
@@ -87,7 +122,7 @@ export interface UptimeWorkerJob {
 const timed = <A, E>(
 	label: string,
 	effect: Effect.Effect<A, E>,
-	log: RequestLogger,
+	log: RequestLogger
 ) =>
 	Effect.gen(function* () {
 		const t = performance.now();
@@ -99,20 +134,26 @@ const timed = <A, E>(
 const resolveSchedule = (scheduleId: string, deps: UptimeWorkerDeps) =>
 	Effect.tryPromise({
 		try: () => deps.lookupSchedule(scheduleId),
-		catch: (cause) => new ScheduleNotFound({ message: String(cause) }),
+		catch: (cause) =>
+			new ScheduleNotFound({ message: String(cause), reason: "transient" }),
 	}).pipe(
 		Effect.flatMap((result) =>
 			result.success
 				? Effect.succeed(result.data)
-				: Effect.fail(new ScheduleNotFound({ message: result.error })),
-		),
+				: Effect.fail(
+						new ScheduleNotFound({
+							message: result.error,
+							reason: result.reason ?? "transient",
+						})
+					)
+		)
 	);
 
 const runCheck = (
 	monitorId: string,
 	url: string,
 	options: CheckOptions,
-	deps: UptimeWorkerDeps,
+	deps: UptimeWorkerDeps
 ) =>
 	Effect.tryPromise({
 		try: () => deps.checkUptime(monitorId, url, 1, options),
@@ -121,20 +162,20 @@ const runCheck = (
 		Effect.flatMap((result) =>
 			result.success
 				? Effect.succeed(result.data)
-				: Effect.fail(new CheckFailed({ message: result.error })),
-		),
+				: Effect.fail(new CheckFailed({ message: result.error }))
+		)
 	);
 
 const fetchPreviousStatus = (monitorId: string, deps: UptimeWorkerDeps) =>
 	Effect.tryPromise(() => deps.getPreviousMonitorStatus(monitorId)).pipe(
-		Effect.orElseSucceed(() => undefined),
+		Effect.orElseSucceed(() => undefined)
 	);
 
 const publishEvent = (
 	data: UptimeData,
 	monitorId: string,
 	deps: UptimeWorkerDeps,
-	log: RequestLogger,
+	log: RequestLogger
 ) =>
 	Effect.tryPromise({
 		try: () => deps.sendUptimeEvent(data, monitorId),
@@ -145,11 +186,10 @@ const publishEvent = (
 			Effect.sync(() =>
 				log.set({
 					kafka_sent: false,
-					kafka_error:
-						error instanceof Error ? error.message : "unknown",
-				}),
-			),
-		),
+					kafka_error: error instanceof Error ? error.message : "unknown",
+				})
+			)
+		)
 	);
 
 const runTransitionAlerts = (
@@ -157,11 +197,10 @@ const runTransitionAlerts = (
 	data: UptimeData,
 	previousStatus: number | undefined,
 	deps: UptimeWorkerDeps,
-	log: RequestLogger,
+	log: RequestLogger
 ) =>
 	Effect.tryPromise({
-		try: () =>
-			deps.fireTransitionAlerts({ schedule, data, previousStatus }),
+		try: () => deps.fireTransitionAlerts({ schedule, data, previousStatus }),
 		catch: (cause) => cause,
 	}).pipe(
 		Effect.tap((transition) =>
@@ -172,36 +211,64 @@ const runTransitionAlerts = (
 						alarms_fired: transition.alarms_fired,
 					});
 				}
-			}),
+			})
 		),
 		Effect.catch((error) =>
 			Effect.sync(() =>
 				log.set({
-					email_error:
-						error instanceof Error ? error.message : "unknown",
-				}),
-			),
-		),
+					email_error: error instanceof Error ? error.message : "unknown",
+				})
+			)
+		)
 	);
+
+function reapScheduler(
+	scheduleId: string,
+	reason: ScheduleLookupReason,
+	deps: UptimeWorkerDeps,
+	log: RequestLogger
+): void {
+	deps
+		.reapOrphanScheduler(scheduleId)
+		.then(() => {
+			log.set({ orphan_scheduler_reaped: true });
+		})
+		.catch((cause) => {
+			log.set({
+				orphan_scheduler_reaped: false,
+				orphan_scheduler_reap_error:
+					cause instanceof Error ? cause.message : String(cause),
+			});
+			deps.captureError(cause, {
+				error_step: "reap_orphan_scheduler",
+				schedule_id: scheduleId,
+				schedule_lookup_reason: reason,
+			});
+		});
+}
 
 const processCheck = (
 	scheduleId: string,
 	log: RequestLogger,
-	deps: UptimeWorkerDeps,
+	deps: UptimeWorkerDeps
 ) =>
 	Effect.gen(function* () {
 		const schedule = yield* timed(
 			"lookup_schedule",
 			resolveSchedule(scheduleId, deps),
-			log,
+			log
 		).pipe(
 			Effect.catchTag("ScheduleNotFound", (e) => {
 				log.set({
 					outcome: "schedule_not_found",
 					error_message: e.message,
+					schedule_lookup_reason: e.reason,
 				});
+				if (REAPABLE_REASONS.has(e.reason)) {
+					reapScheduler(scheduleId, e.reason, deps, log);
+				}
 				return Effect.fail(new ScheduleNotFound(e));
-			}),
+			})
 		);
 
 		log.set({
@@ -209,7 +276,7 @@ const processCheck = (
 			schedule_timeout_ms: schedule.timeout ?? 0,
 			schedule_cache_bust: schedule.cacheBust,
 			schedule_health_extract: deps.isHealthExtractionEnabled(
-				schedule.jsonParsingConfig,
+				schedule.jsonParsingConfig
 			),
 		});
 
@@ -223,23 +290,19 @@ const processCheck = (
 		log.set({
 			monitor_id: monitorId,
 			check_url: schedule.url,
-			...(schedule.websiteId
-				? { website_id: schedule.websiteId }
-				: {}),
+			...(schedule.websiteId ? { website_id: schedule.websiteId } : {}),
 		});
 
 		const options: CheckOptions = {
 			timeout: schedule.timeout ?? undefined,
 			cacheBust: schedule.cacheBust,
-			extractHealth: deps.isHealthExtractionEnabled(
-				schedule.jsonParsingConfig,
-			),
+			extractHealth: deps.isHealthExtractionEnabled(schedule.jsonParsingConfig),
 		};
 
 		const data = yield* timed(
 			"check_uptime",
 			runCheck(monitorId, schedule.url, options, deps),
-			log,
+			log
 		).pipe(
 			Effect.catchTag("CheckFailed", (e) => {
 				log.set({
@@ -247,13 +310,13 @@ const processCheck = (
 					error_message: e.message,
 				});
 				return Effect.fail(new CheckFailed(e));
-			}),
+			})
 		);
 
 		const previousStatus = yield* timed(
 			"previous_status",
 			fetchPreviousStatus(monitorId, deps),
-			log,
+			log
 		);
 
 		log.set({
@@ -274,16 +337,12 @@ const processCheck = (
 			error_message: data.error || "",
 		});
 
-		yield* timed(
-			"kafka",
-			publishEvent(data, monitorId, deps, log),
-			log,
-		);
+		yield* timed("kafka", publishEvent(data, monitorId, deps, log), log);
 
 		yield* timed(
 			"transition_email",
 			runTransitionAlerts(schedule, data, previousStatus, deps, log),
-			log,
+			log
 		);
 	});
 
@@ -291,7 +350,7 @@ export async function processUptimeCheck(
 	scheduleId: string,
 	trigger: UptimeCheckJobData["trigger"],
 	deps: UptimeWorkerDeps = uptimeWorkerDeps,
-	jobMeta?: { id?: string; attempt?: number },
+	jobMeta?: { id?: string; attempt?: number }
 ) {
 	const startedAt = performance.now();
 	const log = deps.createLogger({
@@ -316,7 +375,7 @@ export async function processUptimeCheck(
 
 export async function processUptimeJob(
 	job: UptimeWorkerJob,
-	deps: UptimeWorkerDeps = uptimeWorkerDeps,
+	deps: UptimeWorkerDeps = uptimeWorkerDeps
 ) {
 	if (job.name !== UPTIME_CHECK_JOB_NAME) {
 		throw new Error(`Unknown uptime job: ${job.name}`);
@@ -333,12 +392,10 @@ export function startUptimeWorker() {
 		(job) => processUptimeJob(job),
 		{
 			connection: getBullMQWorkerConnectionOptions(),
-			concurrency: Number(
-				process.env.UPTIME_WORKER_CONCURRENCY ?? 10_000,
-			),
+			concurrency: getUptimeWorkerConcurrency(),
 			lockDuration: UPTIME_JOB_TIMEOUT_MS * 3,
 			stalledInterval: UPTIME_JOB_TIMEOUT_MS * 4,
-		},
+		}
 	);
 
 	worker.on("failed", (job, error) => {

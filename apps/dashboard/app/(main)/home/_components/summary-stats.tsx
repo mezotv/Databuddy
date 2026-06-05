@@ -59,14 +59,7 @@ export function SummaryStats({
 	activeMonitors,
 	isLoading,
 }: SummaryStatsProps) {
-	const showLoading =
-		isLoading ||
-		(websiteCount === 0 &&
-			totalMonitors === 0 &&
-			totalActiveUsers === 0 &&
-			totalViews === 0);
-
-	if (showLoading) {
+	if (isLoading) {
 		return (
 			<div className="grid gap-1.5 rounded-xl bg-secondary p-1.5 sm:grid-cols-2 lg:grid-cols-4">
 				<StatCardSkeleton />

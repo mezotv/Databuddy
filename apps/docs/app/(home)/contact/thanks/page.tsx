@@ -1,4 +1,4 @@
-import { CheckIcon } from "@phosphor-icons/react/ssr";
+import { CheckIcon } from "@databuddy/ui/icons";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Footer } from "@/components/footer";

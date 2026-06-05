@@ -1,7 +1,8 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Suspense, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { MonitorRow } from "@/components/monitors/monitor-row";
 import { MonitorSheet } from "@/components/monitors/monitor-sheet";
@@ -15,36 +16,25 @@ import {
 } from "@databuddy/ui/icons";
 import { Button, Card, EmptyState, Skeleton } from "@databuddy/ui";
 import { MonitorsSearchBar } from "./_components/monitors-search-bar";
+import type { Monitor } from "./_components/types";
 import {
 	type SortOption,
 	type StatusFilter,
 	useFilteredMonitors,
 } from "./_components/use-filtered-monitors";
 
-export interface Monitor {
-	cacheBust: boolean;
-	createdAt: Date | string;
-	cron: string;
-	granularity: string;
-	id: string;
-	isPaused: boolean;
-	jsonParsingConfig?: {
-		enabled: boolean;
-	} | null;
-	name: string | null;
-	organizationId: string;
-	timeout: number | null;
-	updatedAt: Date | string;
-	url: string | null;
-	website: {
-		id: string;
-		name: string | null;
-		domain: string;
-	} | null;
-	websiteId: string | null;
+export default function MonitorsPage() {
+	return (
+		<Suspense fallback={null}>
+			<MonitorsPageContent />
+		</Suspense>
+	);
 }
 
-export default function MonitorsPage() {
+function MonitorsPageContent() {
+	const router = useRouter();
+	const pathname = usePathname();
+	const searchParams = useSearchParams();
 	const [isSheetOpen, setIsSheetOpen] = useState(false);
 	const [search, setSearch] = useState("");
 	const [sort, setSort] = useState<SortOption>("newest");
@@ -65,10 +55,19 @@ export default function MonitorsPage() {
 		...orpc.uptime.listSchedules.queryOptions({ input: {} }),
 	});
 
-	const handleCreate = () => {
+	const clearCommandParam = useCallback(() => {
+		const params = new URLSearchParams(searchParams.toString());
+		params.delete("command");
+		const query = params.toString();
+		router.replace(query ? `${pathname}?${query}` : pathname, {
+			scroll: false,
+		});
+	}, [pathname, router, searchParams]);
+
+	const handleCreate = useCallback(() => {
 		setEditingSchedule(null);
 		setIsSheetOpen(true);
-	};
+	}, []);
 
 	const handleEdit = (schedule: Monitor) => {
 		setEditingSchedule({
@@ -91,6 +90,14 @@ export default function MonitorsPage() {
 		setIsSheetOpen(false);
 		setEditingSchedule(null);
 	};
+
+	useEffect(() => {
+		if (searchParams.get("command") !== "create-monitor") {
+			return;
+		}
+		handleCreate();
+		clearCommandParam();
+	}, [clearCommandParam, handleCreate, searchParams]);
 
 	const monitors = (schedulesQuery.data ?? []) as Monitor[];
 	const filtered = useFilteredMonitors(monitors, search, sort, statusFilter);
@@ -128,9 +135,8 @@ export default function MonitorsPage() {
 									<ArrowClockwiseIcon
 										className={cn(
 											"size-3.5",
-											(schedulesQuery.isLoading ||
-												schedulesQuery.isFetching) &&
-												"animate-spin",
+											(schedulesQuery.isLoading || schedulesQuery.isFetching) &&
+												"animate-spin"
 										)}
 									/>
 								</Button>
@@ -161,7 +167,7 @@ export default function MonitorsPage() {
 								</div>
 							)}
 
-							{!isLoading && !hasMonitors && (
+							{!(isLoading || hasMonitors) && (
 								<div className="px-5 py-12">
 									<EmptyState
 										action={

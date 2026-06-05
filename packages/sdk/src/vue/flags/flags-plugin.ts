@@ -8,17 +8,30 @@ let state: { flags: Record<string, FlagResult> } | null = null;
 
 export function createFlagsPlugin(options: FlagsConfig) {
 	return {
-		install(_app: App) {
+		install(app: App) {
 			const storage = options.skipStorage
 				? undefined
 				: new BrowserFlagStorage();
 			state = reactive({ flags: {} });
 			manager = new BrowserFlagsManager({ config: options, storage });
+			const currentManager = manager;
 			manager.subscribe(() => {
 				if (state) {
 					state.flags = manager?.getSnapshot().flags ?? {};
 				}
 			});
+
+			if (typeof window !== "undefined") {
+				const w = window as unknown as {
+					__databuddyFlags?: BrowserFlagsManager;
+				};
+				w.__databuddyFlags = currentManager;
+				app.onUnmount(() => {
+					if (w.__databuddyFlags === currentManager) {
+						w.__databuddyFlags = undefined;
+					}
+				});
+			}
 		},
 	};
 }

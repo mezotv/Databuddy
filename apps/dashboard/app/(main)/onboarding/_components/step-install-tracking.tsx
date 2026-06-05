@@ -27,7 +27,7 @@ import { cn } from "@/lib/utils";
 import {
 	COPY_SUCCESS_TIMEOUT,
 	INSTALL_COMMANDS,
-} from "../../websites/[id]/_components/shared/tracking-constants";
+} from "../../websites/[id]/_components/constants/settings-constants";
 import {
 	generateNpmCode,
 	generateScriptTag,
@@ -106,16 +106,6 @@ Enable what makes sense for this website. A good starting point:
 
 \`\`\`tsx
 import { track } from "@databuddy/sdk";
-import {
-	ArrowClockwiseIcon,
-	CheckIcon,
-	ClipboardIcon,
-	CodeIcon,
-	PackageIcon,
-	PulseIcon,
-	RobotIcon,
-	WarningCircleIcon,
-} from "@databuddy/ui/icons";
 track("signup_completed", { method: "google", plan: "pro" });
 \`\`\`
 

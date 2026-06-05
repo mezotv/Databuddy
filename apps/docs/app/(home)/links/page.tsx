@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Footer } from "@/components/footer";
+import { TrackOnMount } from "@/components/track-on-mount";
 import { CELL_TITLE_CLASS } from "@/components/landing/demo-constants";
 import {
 	FeatureHero,
@@ -67,6 +68,10 @@ const container = "mx-auto w-full max-w-400 px-4 sm:px-14 lg:px-20";
 export default function LinksPage() {
 	return (
 		<>
+			<TrackOnMount
+				event="feature_landing_viewed"
+				properties={{ feature: "links" }}
+			/>
 			<StructuredData
 				elements={[{ type: "faq", items: [...FAQ_ITEMS] }]}
 				page={{
@@ -164,7 +169,7 @@ export default function LinksPage() {
 
 				<Section className="border-border border-b" id="faq">
 					<div className={container}>
-						<FaqSection eyebrow="FAQ" items={[...FAQ_ITEMS]} />
+						<FaqSection items={[...FAQ_ITEMS]} />
 					</div>
 				</Section>
 

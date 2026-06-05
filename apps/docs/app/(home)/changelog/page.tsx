@@ -1,4 +1,4 @@
-import { RocketLaunchIcon } from "@phosphor-icons/react/ssr";
+import { RocketLaunchIcon } from "@databuddy/ui/icons";
 import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";

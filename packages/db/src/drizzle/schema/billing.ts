@@ -125,7 +125,9 @@ export const alarmDestinationTypeValues = [
 export type AlarmDestinationTypeValue =
 	(typeof alarmDestinationTypeValues)[number];
 
-export type UptimeTriggerConditions = { monitorIds: string[] };
+export interface UptimeTriggerConditions {
+	monitorIds: string[];
+}
 export type TrafficSpikeTriggerConditions = Record<string, unknown>;
 export type ErrorRateTriggerConditions = Record<string, unknown>;
 

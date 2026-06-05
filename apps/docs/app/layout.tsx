@@ -37,10 +37,10 @@ export const metadata: Metadata = {
 	title: {
 		template: "%s | Databuddy",
 		default:
-			"Databuddy - Privacy-first analytics, error tracking & feature flags",
+			"Databuddy - Lightweight Developer Analytics, Error Tracking & Feature Flags",
 	},
 	description:
-		"One lightweight layer for analytics, error tracking, and feature flags. Under 30 KB, no cookies, GDPR compliant by default. Open-source Google Analytics alternative.",
+		"One script for analytics, error tracking, web vitals, and feature flags. Under 30 KB, no cookies, GDPR compliant. Free for small projects. Open-source Google Analytics alternative for developers.",
 	authors: [{ name: "Databuddy Team" }],
 	creator: "Databuddy",
 	publisher: "Databuddy",
@@ -93,14 +93,6 @@ export default function Layout({ children }: { children: ReactNode }) {
 			lang="en"
 			suppressHydrationWarning
 		>
-			<Databuddy
-				clientId="OXmNQsViBT-FOS_wZCTHc"
-				disabled={process.env.NODE_ENV === "development"}
-				trackAttributes
-				trackErrors
-				trackOutgoingLinks
-				trackWebVitals
-			/>
 			<body className="min-h-dvh">
 				<ThemeProvider attribute="class" defaultTheme="dark" forcedTheme="dark">
 					<NuqsAdapter>
@@ -115,6 +107,14 @@ export default function Layout({ children }: { children: ReactNode }) {
 						</RootProvider>
 					</NuqsAdapter>
 				</ThemeProvider>
+				<Databuddy
+					clientId="OXmNQsViBT-FOS_wZCTHc"
+					disabled={process.env.NODE_ENV === "development"}
+					trackAttributes
+					trackErrors
+					trackOutgoingLinks
+					trackWebVitals
+				/>
 			</body>
 		</html>
 	);

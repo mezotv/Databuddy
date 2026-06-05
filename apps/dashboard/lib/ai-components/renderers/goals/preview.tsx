@@ -1,8 +1,12 @@
 "use client";
 
-import type { Icon } from "@phosphor-icons/react";
 import { useParams } from "next/navigation";
-import { useCallback, useState } from "react";
+import {
+	type ComponentType,
+	type SVGProps,
+	useCallback,
+	useState,
+} from "react";
 import { toast } from "sonner";
 import { EditGoalDialog } from "@/app/(main)/websites/[id]/goals/_components/edit-goal-dialog";
 import { useChat } from "@/contexts/chat-context";
@@ -16,6 +20,10 @@ import {
 	TrashIcon,
 } from "@databuddy/ui/icons";
 import { Badge, Button, Card } from "@databuddy/ui";
+
+type IconComponent = ComponentType<
+	SVGProps<SVGSVGElement> & { size?: number | string; weight?: string }
+>;
 
 interface GoalPreviewData {
 	description?: string | null;
@@ -32,7 +40,7 @@ export interface GoalPreviewProps extends BaseComponentProps {
 
 interface ModeConfig {
 	accent: string;
-	ButtonIcon: Icon;
+	ButtonIcon: IconComponent;
 	confirmLabel: string;
 	confirmMessage: string;
 	title: string;
@@ -80,6 +88,7 @@ export function GoalPreviewRenderer({
 
 	const config = MODE_CONFIG[mode];
 	const isLoading = status === "streaming" || status === "submitted";
+	const canEditInline = mode === "create";
 
 	let goalTypeBadge = "Custom";
 	if (goal.type === "PAGE_VIEW") {
@@ -87,23 +96,6 @@ export function GoalPreviewRenderer({
 	} else if (goal.type === "EVENT") {
 		goalTypeBadge = "Event";
 	}
-
-	// Convert to Goal type for the dialog
-	const goalForDialog: Goal = {
-		id: "",
-		websiteId,
-		name: goal.name,
-		description: goal.description ?? null,
-		type: goal.type,
-		target: goal.target,
-		filters: [],
-		ignoreHistoricData: goal.ignoreHistoricData ?? false,
-		isActive: true,
-		createdAt: new Date(),
-		updatedAt: new Date(),
-		createdBy: "",
-		deletedAt: null,
-	};
 
 	const handleConfirm = () => {
 		setIsConfirming(true);
@@ -164,7 +156,7 @@ export function GoalPreviewRenderer({
 							<div>
 								<p className="text-muted-foreground text-xs">Target</p>
 								<pre className="mt-1 overflow-x-auto text-pretty break-all rounded bg-muted p-1.5 px-2 font-mono text-xs">
-									<code className="text-ring font-semibold">{goal.target}</code>
+									<code className="font-semibold text-ring">{goal.target}</code>
 								</pre>
 							</div>
 							{goal.ignoreHistoricData && (
@@ -182,15 +174,17 @@ export function GoalPreviewRenderer({
 
 					<div className="rounded-md bg-background">
 						<div className="flex items-center justify-end gap-2 bg-muted/30 px-2 py-2">
-							<Button
-								disabled={isLoading || isConfirming}
-								onClick={() => setIsDialogOpen(true)}
-								size="sm"
-								variant="ghost"
-							>
-								<PencilSimpleIcon className="size-3.5" />
-								Edit
-							</Button>
+							{canEditInline && (
+								<Button
+									disabled={isLoading || isConfirming}
+									onClick={() => setIsDialogOpen(true)}
+									size="sm"
+									variant="ghost"
+								>
+									<PencilSimpleIcon className="size-3.5" />
+									Edit
+								</Button>
+							)}
 							<Button
 								disabled={isLoading}
 								loading={isConfirming}
@@ -206,13 +200,15 @@ export function GoalPreviewRenderer({
 				</div>
 			</Card>
 
-			<EditGoalDialog
-				goal={mode === "create" ? null : goalForDialog}
-				isOpen={isDialogOpen}
-				isSaving={isCreating}
-				onClose={() => setIsDialogOpen(false)}
-				onSave={handleSaveFromDialog}
-			/>
+			{canEditInline && (
+				<EditGoalDialog
+					goal={null}
+					isOpen={isDialogOpen}
+					isSaving={isCreating}
+					onClose={() => setIsDialogOpen(false)}
+					onSave={handleSaveFromDialog}
+				/>
+			)}
 		</>
 	);
 }

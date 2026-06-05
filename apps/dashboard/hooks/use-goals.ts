@@ -1,6 +1,6 @@
 import type { InferInsertModel, InferSelectModel } from "@databuddy/db";
 import type { goals } from "@databuddy/db/schema";
-import type { GoalFilter } from "@databuddy/shared/types/api";
+import type { GoalFilter } from "@/types/api";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { toast } from "sonner";

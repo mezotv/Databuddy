@@ -1,7 +1,8 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Suspense, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { useOrganizationsContext } from "@/components/providers/organizations-provider";
@@ -12,10 +13,10 @@ import {
 import { StatusPageSheet } from "@/components/status-pages/status-page-sheet";
 import { orpc } from "@/lib/orpc";
 import { cn } from "@/lib/utils";
-import { BrowserIcon } from "@phosphor-icons/react/dist/ssr";
 import {
 	ArrowClockwiseIcon,
 	MagnifyingGlassIcon,
+	OpenExternalIcon as BrowserIcon,
 	PlusIcon,
 } from "@databuddy/ui/icons";
 import { DeleteDialog } from "@databuddy/ui/client";
@@ -28,6 +29,17 @@ import {
 } from "../_components/use-filtered-status-pages";
 
 export default function StatusPagesListPage() {
+	return (
+		<Suspense fallback={null}>
+			<StatusPagesListPageContent />
+		</Suspense>
+	);
+}
+
+function StatusPagesListPageContent() {
+	const router = useRouter();
+	const pathname = usePathname();
+	const searchParams = useSearchParams();
 	const { activeOrganizationId, activeOrganization } =
 		useOrganizationsContext();
 	const queryClient = useQueryClient();
@@ -35,8 +47,9 @@ export default function StatusPagesListPage() {
 	const [search, setSearch] = useState("");
 	const [sort, setSort] = useState<SortOption>("newest");
 	const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-	const [editingStatusPage, setEditingStatusPage] =
-		useState<StatusPage | null>(null);
+	const [editingStatusPage, setEditingStatusPage] = useState<StatusPage | null>(
+		null
+	);
 	const [statusPageToDelete, setStatusPageToDelete] =
 		useState<StatusPage | null>(null);
 
@@ -60,10 +73,19 @@ export default function StatusPagesListPage() {
 		},
 	});
 
-	const handleCreate = () => {
+	const clearCommandParam = useCallback(() => {
+		const params = new URLSearchParams(searchParams.toString());
+		params.delete("command");
+		const query = params.toString();
+		router.replace(query ? `${pathname}?${query}` : pathname, {
+			scroll: false,
+		});
+	}, [pathname, router, searchParams]);
+
+	const handleCreate = useCallback(() => {
 		setEditingStatusPage(null);
 		setIsSheetOpen(true);
-	};
+	}, []);
 
 	const handleEdit = (statusPage: StatusPage) => {
 		setEditingStatusPage(statusPage);
@@ -82,12 +104,20 @@ export default function StatusPagesListPage() {
 		setEditingStatusPage(null);
 	};
 
+	useEffect(() => {
+		if (searchParams.get("command") !== "create-status-page") {
+			return;
+		}
+		handleCreate();
+		clearCommandParam();
+	}, [clearCommandParam, handleCreate, searchParams]);
+
 	const statusPages = statusPagesQuery.data ?? [];
 	const filtered = useFilteredStatusPages(
 		statusPages,
 		search,
 		sort,
-		statusFilter,
+		statusFilter
 	);
 	const isLoading = statusPagesQuery.isLoading;
 	const hasEmpty = statusPages.some((p) => p.monitorCount === 0);
@@ -128,7 +158,7 @@ export default function StatusPagesListPage() {
 											"size-3.5",
 											(statusPagesQuery.isLoading ||
 												statusPagesQuery.isFetching) &&
-												"animate-spin",
+												"animate-spin"
 										)}
 									/>
 								</Button>
@@ -159,7 +189,7 @@ export default function StatusPagesListPage() {
 								</div>
 							)}
 
-							{!isLoading && !hasPages && (
+							{!(isLoading || hasPages) && (
 								<div className="px-5 py-12">
 									<EmptyState
 										action={

@@ -1,9 +1,9 @@
-import { and, eq, isNull } from "@databuddy/db";
+import { randomUUID } from "node:crypto";
+import { eq } from "@databuddy/db";
 import { revenueConfig } from "@databuddy/db/schema";
-import { createId } from "@databuddy/shared/utils/ids";
 import { z } from "zod";
 import { rpcError } from "../errors";
-import { sessionProcedure } from "../orpc";
+import { protectedProcedure, sessionProcedure } from "../orpc";
 import { withWorkspace } from "../procedures/with-workspace";
 
 function generateHash(): string {
@@ -16,7 +16,7 @@ function generateHash(): string {
 const revenueOutputSchema = z.record(z.string(), z.unknown());
 
 export const revenueRouter = {
-	get: sessionProcedure
+	get: protectedProcedure
 		.route({
 			description:
 				"Returns revenue config for website or org. Requires configure permission.",
@@ -42,14 +42,8 @@ export const revenueRouter = {
 
 			const config = await context.db.query.revenueConfig.findFirst({
 				where: input.websiteId
-					? and(
-							eq(revenueConfig.ownerId, ownerId),
-							eq(revenueConfig.websiteId, input.websiteId)
-						)
-					: and(
-							eq(revenueConfig.ownerId, ownerId),
-							isNull(revenueConfig.websiteId)
-						),
+					? { ownerId, websiteId: input.websiteId }
+					: { ownerId, websiteId: { isNull: true } },
 			});
 
 			if (!config) {
@@ -98,14 +92,8 @@ export const revenueRouter = {
 
 			const existing = await context.db.query.revenueConfig.findFirst({
 				where: input.websiteId
-					? and(
-							eq(revenueConfig.ownerId, ownerId),
-							eq(revenueConfig.websiteId, input.websiteId)
-						)
-					: and(
-							eq(revenueConfig.ownerId, ownerId),
-							isNull(revenueConfig.websiteId)
-						),
+					? { ownerId, websiteId: input.websiteId }
+					: { ownerId, websiteId: { isNull: true } },
 			});
 
 			if (existing) {
@@ -135,7 +123,7 @@ export const revenueRouter = {
 			const [created] = await context.db
 				.insert(revenueConfig)
 				.values({
-					id: createId(),
+					id: randomUUID(),
 					ownerId,
 					websiteId: input.websiteId || null,
 					webhookHash: generateHash(),
@@ -177,14 +165,8 @@ export const revenueRouter = {
 
 			const existing = await context.db.query.revenueConfig.findFirst({
 				where: input.websiteId
-					? and(
-							eq(revenueConfig.ownerId, ownerId),
-							eq(revenueConfig.websiteId, input.websiteId)
-						)
-					: and(
-							eq(revenueConfig.ownerId, ownerId),
-							isNull(revenueConfig.websiteId)
-						),
+					? { ownerId, websiteId: input.websiteId }
+					: { ownerId, websiteId: { isNull: true } },
 			});
 
 			if (!existing) {
@@ -223,14 +205,8 @@ export const revenueRouter = {
 
 			const existing = await context.db.query.revenueConfig.findFirst({
 				where: input.websiteId
-					? and(
-							eq(revenueConfig.ownerId, ownerId),
-							eq(revenueConfig.websiteId, input.websiteId)
-						)
-					: and(
-							eq(revenueConfig.ownerId, ownerId),
-							isNull(revenueConfig.websiteId)
-						),
+					? { ownerId, websiteId: input.websiteId }
+					: { ownerId, websiteId: { isNull: true } },
 			});
 
 			if (!existing) {

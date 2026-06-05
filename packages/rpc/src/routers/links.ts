@@ -2,6 +2,7 @@ import { and, desc, eq, isNull, isUniqueViolationFor } from "@databuddy/db";
 import { linkFolders, links } from "@databuddy/db/schema";
 import {
 	type CachedLink,
+	invalidateAgentContextSnapshotsForOwner,
 	invalidateLinkCache,
 	setCachedLink,
 } from "@databuddy/redis";
@@ -122,9 +123,7 @@ const linkOutputSchema = z.object({
 function validateHttpUrl(url: string): void {
 	const parsed = new URL(url);
 	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-		throw rpcError.badRequest(
-			"Target URL must be an absolute HTTP or HTTPS URL"
-		);
+		throw rpcError.badRequest("URL must be an absolute HTTP or HTTPS URL");
 	}
 }
 
@@ -163,14 +162,13 @@ function getTargetDomain(targetUrl: string): string | null {
 	}
 }
 
-async function resolveFolderId(
+async function validateFolderId(
 	db: Context["db"],
 	folderId: string | null | undefined,
-	organizationId: string,
-	linkName: string,
-	createdBy: string
+	organizationId: string
 ): Promise<string | null> {
-	if (!folderId) {
+	const normalizedFolderId = folderId?.trim() || null;
+	if (!normalizedFolderId) {
 		return null;
 	}
 
@@ -179,37 +177,18 @@ async function resolveFolderId(
 		.from(linkFolders)
 		.where(
 			and(
-				eq(linkFolders.id, folderId),
-				eq(linkFolders.organizationId, organizationId)
+				eq(linkFolders.id, normalizedFolderId),
+				eq(linkFolders.organizationId, organizationId),
+				isNull(linkFolders.deletedAt)
 			)
 		)
 		.limit(1);
 
 	if (existing.length > 0) {
-		return folderId;
+		return normalizedFolderId;
 	}
 
-	const folderName = linkName.trim() || "Untitled";
-	const baseSlug =
-		folderName
-			.toLowerCase()
-			.replace(/[^a-z0-9\s_-]/g, "")
-			.replace(/[\s_]+/g, "-")
-			.replace(/-+/g, "-")
-			.replace(/^-|-$/g, "") || "folder";
-
-	const [folder] = await db
-		.insert(linkFolders)
-		.values({
-			id: randomUUIDv7(),
-			organizationId,
-			createdBy,
-			name: folderName,
-			slug: `${baseSlug.slice(0, 59)}-${randomUUIDv7().slice(0, 4)}`,
-		})
-		.returning({ id: linkFolders.id });
-
-	return folder.id;
+	throw rpcError.badRequest("Link folder does not exist in this organization");
 }
 
 function toCachedLink(link: {
@@ -321,6 +300,9 @@ export const linksRouter = {
 			}
 
 			const linkRow = result[0];
+			if (!linkRow) {
+				throw rpcError.notFound("link", input.id);
+			}
 			await withLinksAccess(context, {
 				organizationId: linkRow.organizationId,
 				permission: "read",
@@ -357,13 +339,14 @@ export const linksRouter = {
 			});
 
 			validateHttpUrl(input.targetUrl);
+			if (input.expiredRedirectUrl) {
+				validateHttpUrl(input.expiredRedirectUrl);
+			}
 			const createdBy = await workspace.getCreatedBy();
-			const resolvedFolderId = await resolveFolderId(
+			const resolvedFolderId = await validateFolderId(
 				context.db,
 				input.folderId,
-				organizationId,
-				input.name,
-				createdBy
+				organizationId
 			);
 			const targetDomain =
 				normalizeTargetDomain(input.targetDomain) ??
@@ -402,10 +385,20 @@ export const linksRouter = {
 						})
 						.returning();
 
-					await setCachedLink(slug, toCachedLink(newLink)).catch((err) =>
+					if (!newLink) {
+						throw rpcError.internal("Failed to create link");
+					}
+
+					setCachedLink(slug, toCachedLink(newLink)).catch((err) =>
 						logger.error(
 							{ slug, linkId: newLink.id, error: String(err) },
 							"Failed to cache link after create"
+						)
+					);
+					invalidateAgentContextSnapshotsForOwner(organizationId).catch((err) =>
+						logger.error(
+							{ organizationId, error: String(err) },
+							"Failed to invalidate agent context snapshots after link create"
 						)
 					);
 
@@ -446,6 +439,9 @@ export const linksRouter = {
 			}
 
 			const link = existingLink[0];
+			if (!link) {
+				throw rpcError.notFound("link", input.id);
+			}
 			await withLinksAccess(context, {
 				organizationId: link.organizationId,
 				permission: "update",
@@ -454,15 +450,16 @@ export const linksRouter = {
 			if (input.targetUrl) {
 				validateHttpUrl(input.targetUrl);
 			}
+			if (input.expiredRedirectUrl) {
+				validateHttpUrl(input.expiredRedirectUrl);
+			}
 
 			let resolvedFolderId: string | null | undefined;
 			if (input.folderId !== undefined) {
-				resolvedFolderId = await resolveFolderId(
+				resolvedFolderId = await validateFolderId(
 					context.db,
 					input.folderId,
-					link.organizationId,
-					input.name ?? link.name,
-					context.user?.id ?? link.createdBy
+					link.organizationId
 				);
 			}
 
@@ -515,11 +512,16 @@ export const linksRouter = {
 					.where(eq(links.id, id))
 					.returning();
 
-				await Promise.all([
+				if (!updatedLink) {
+					throw rpcError.notFound("link", input.id);
+				}
+
+				Promise.all([
 					oldSlug === updatedLink.slug
 						? Promise.resolve()
 						: invalidateLinkCache(oldSlug),
 					setCachedLink(updatedLink.slug, toCachedLink(updatedLink)),
+					invalidateAgentContextSnapshotsForOwner(link.organizationId),
 				]).catch((err) =>
 					logger.error(
 						{
@@ -567,6 +569,9 @@ export const linksRouter = {
 			}
 
 			const link = existingLink[0];
+			if (!link) {
+				throw rpcError.notFound("link", input.id);
+			}
 
 			await withLinksAccess(context, {
 				organizationId: link.organizationId,
@@ -585,8 +590,14 @@ export const linksRouter = {
 				);
 			}
 
-			// Hard delete the link
 			await context.db.delete(links).where(eq(links.id, input.id));
+			invalidateAgentContextSnapshotsForOwner(link.organizationId).catch(
+				(err) =>
+					logger.error(
+						{ organizationId: link.organizationId, error: String(err) },
+						"Failed to invalidate agent context snapshots after link delete"
+					)
+			);
 
 			return { success: true };
 		}),

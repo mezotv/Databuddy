@@ -29,18 +29,12 @@ export const GATED_FEATURES = {
 	WEB_VITALS: "web_vitals",
 	ERROR_TRACKING: "error_tracking",
 	GEOGRAPHIC: "geographic",
-	TEAM_ROLES: "team_roles",
-	TARGET_GROUPS: "target_groups",
 } as const;
 
 export type GatedFeatureId =
 	(typeof GATED_FEATURES)[keyof typeof GATED_FEATURES];
 
-export const HIDDEN_PRICING_FEATURES: GatedFeatureId[] = [
-	GATED_FEATURES.ERROR_TRACKING,
-	GATED_FEATURES.TEAM_ROLES,
-	GATED_FEATURES.TARGET_GROUPS,
-];
+export const HIDDEN_PRICING_FEATURES: GatedFeatureId[] = [];
 
 export type FeatureLimit = number | "unlimited" | false;
 
@@ -56,8 +50,6 @@ export const PLAN_FEATURE_LIMITS: Record<
 		[GATED_FEATURES.WEB_VITALS]: "unlimited",
 		[GATED_FEATURES.ERROR_TRACKING]: false, // Hobby+
 		[GATED_FEATURES.GEOGRAPHIC]: "unlimited",
-		[GATED_FEATURES.TEAM_ROLES]: "unlimited",
-		[GATED_FEATURES.TARGET_GROUPS]: false, // Hobby+
 	},
 	[PLAN_IDS.HOBBY]: {
 		[GATED_FEATURES.FUNNELS]: 5, // 5 funnels
@@ -67,8 +59,6 @@ export const PLAN_FEATURE_LIMITS: Record<
 		[GATED_FEATURES.WEB_VITALS]: "unlimited",
 		[GATED_FEATURES.ERROR_TRACKING]: "unlimited",
 		[GATED_FEATURES.GEOGRAPHIC]: "unlimited",
-		[GATED_FEATURES.TEAM_ROLES]: "unlimited",
-		[GATED_FEATURES.TARGET_GROUPS]: 5, // 5 target groups
 	},
 	[PLAN_IDS.PRO]: {
 		[GATED_FEATURES.FUNNELS]: 50, // 50 funnels
@@ -78,8 +68,6 @@ export const PLAN_FEATURE_LIMITS: Record<
 		[GATED_FEATURES.WEB_VITALS]: "unlimited",
 		[GATED_FEATURES.ERROR_TRACKING]: "unlimited",
 		[GATED_FEATURES.GEOGRAPHIC]: "unlimited",
-		[GATED_FEATURES.TEAM_ROLES]: "unlimited",
-		[GATED_FEATURES.TARGET_GROUPS]: 25, // 25 target groups
 	},
 	[PLAN_IDS.SCALE]: {
 		[GATED_FEATURES.FUNNELS]: "unlimited",
@@ -89,8 +77,6 @@ export const PLAN_FEATURE_LIMITS: Record<
 		[GATED_FEATURES.WEB_VITALS]: "unlimited",
 		[GATED_FEATURES.ERROR_TRACKING]: "unlimited",
 		[GATED_FEATURES.GEOGRAPHIC]: "unlimited",
-		[GATED_FEATURES.TEAM_ROLES]: "unlimited",
-		[GATED_FEATURES.TARGET_GROUPS]: "unlimited",
 	},
 };
 
@@ -112,6 +98,13 @@ const PLAN_FEATURES: Record<
 export interface PlanCapabilities {
 	features: Record<GatedFeatureId, boolean>;
 	limits: Record<GatedFeatureId, FeatureLimit>;
+}
+
+export function normalizePlanId(planId: PlanId | string | null): PlanId {
+	const normalized = (planId ?? PLAN_IDS.FREE).toLowerCase();
+	return PLAN_HIERARCHY.includes(normalized as PlanId)
+		? (normalized as PlanId)
+		: PLAN_IDS.FREE;
 }
 
 export const PLAN_CAPABILITIES: Record<PlanId, PlanCapabilities> = {
@@ -178,12 +171,6 @@ export const FEATURE_METADATA: Record<FeatureId | GatedFeatureId, FeatureMeta> =
 			upgradeMessage: "Upgrade for more feature flags",
 			unit: "flags",
 		},
-		[GATED_FEATURES.TARGET_GROUPS]: {
-			name: "Target Groups",
-			description: "Create target groups to target your users",
-			upgradeMessage: "Upgrade for more target groups",
-			unit: "groups",
-		},
 		[GATED_FEATURES.WEB_VITALS]: {
 			name: "Web Vitals",
 			description: "Monitor Core Web Vitals and performance",
@@ -200,28 +187,22 @@ export const FEATURE_METADATA: Record<FeatureId | GatedFeatureId, FeatureMeta> =
 			description: "View visitor locations on a map",
 			upgradeMessage: "Geographic is available on all plans",
 		},
-		[GATED_FEATURES.TEAM_ROLES]: {
-			name: "Team Roles",
-			description: "Assign roles and permissions to team members",
-			upgradeMessage: "Team members are unlimited on all plans",
-			unit: "members",
-		},
 	};
 
 export function isPlanFeatureEnabled(
 	planId: PlanId | string | null,
 	feature: GatedFeatureId
 ): boolean {
-	const plan = (planId ?? PLAN_IDS.FREE) as PlanId;
-	return PLAN_FEATURES[plan]?.[feature] ?? false;
+	const plan = normalizePlanId(planId);
+	return PLAN_FEATURES[plan][feature];
 }
 
 export function getPlanFeatureLimit(
 	planId: PlanId | string | null,
 	feature: GatedFeatureId
 ): FeatureLimit {
-	const plan = (planId ?? PLAN_IDS.FREE) as PlanId;
-	return PLAN_FEATURE_LIMITS[plan]?.[feature] ?? false;
+	const plan = normalizePlanId(planId);
+	return PLAN_FEATURE_LIMITS[plan][feature];
 }
 
 export function isFeatureAvailable(
@@ -251,12 +232,15 @@ export function getNextPlanForFeature(
 	currentPlan: PlanId | string | null,
 	feature: GatedFeatureId
 ): PlanId | null {
-	const plan = (currentPlan ?? PLAN_IDS.FREE) as PlanId;
+	const plan = normalizePlanId(currentPlan);
 	const currentIndex = PLAN_HIERARCHY.indexOf(plan);
 	const currentLimit = PLAN_FEATURE_LIMITS[plan][feature];
 
 	for (let i = currentIndex + 1; i < PLAN_HIERARCHY.length; i++) {
 		const nextPlan = PLAN_HIERARCHY[i];
+		if (!nextPlan) {
+			continue;
+		}
 		const nextLimit = PLAN_FEATURE_LIMITS[nextPlan][feature];
 
 		if (nextLimit === "unlimited") {
@@ -291,6 +275,5 @@ export function getMinimumPlanForFeature(
 export function getPlanCapabilities(
 	planId: PlanId | string | null
 ): PlanCapabilities {
-	const plan = (planId ?? PLAN_IDS.FREE) as PlanId;
-	return PLAN_CAPABILITIES[plan] ?? PLAN_CAPABILITIES[PLAN_IDS.FREE];
+	return PLAN_CAPABILITIES[normalizePlanId(planId)];
 }

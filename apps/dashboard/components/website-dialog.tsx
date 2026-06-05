@@ -62,7 +62,8 @@ export function WebsiteDialog({
 	onSave,
 }: WebsiteDialogProps) {
 	const isEditing = !!website;
-	const { activeOrganization } = useOrganizationsContext();
+	const { activeOrganization, activeOrganizationId, organizations } =
+		useOrganizationsContext();
 
 	const createWebsiteMutation = useCreateWebsite();
 	const updateWebsiteMutation = useUpdateWebsite();
@@ -119,7 +120,11 @@ export function WebsiteDialog({
 		const submissionData: CreateWebsiteData = {
 			name: formData.name,
 			domain: formData.domain,
-			organizationId: activeOrganization?.id,
+			organizationId:
+				activeOrganization?.id ??
+				activeOrganizationId ??
+				organizations[0]?.id ??
+				undefined,
 		};
 
 		try {

@@ -59,7 +59,9 @@ mock.module("@databuddy/redis", () => ({
 
 mock.module("../lib/logger", () => ({
 	logger: {
+		error: () => {},
 		info: () => {},
+		warn: () => {},
 	},
 }));
 

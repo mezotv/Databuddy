@@ -2,6 +2,10 @@ import type {
 	AnalyticsEvent,
 	CustomOutgoingLink,
 } from "@databuddy/db/clickhouse/schema";
+import type {
+	AnalyticsEventInput,
+	OutgoingLinkInput,
+} from "@databuddy/validation";
 import {
 	analyticsEventSchema,
 	batchedCustomEventSpansSchema,
@@ -21,6 +25,7 @@ import {
 	insertTrackEvent,
 	insertTrackEventsBatch,
 } from "@lib/event-service";
+import { summarizeRejectedBody } from "@lib/rejection-summary";
 import {
 	checkForBot,
 	type ValidatedRequest,
@@ -56,7 +61,7 @@ import { EvlogError } from "evlog";
 import { useLogger } from "evlog/elysia";
 
 function processTrackEventData(
-	trackData: any,
+	trackData: AnalyticsEventInput,
 	clientId: string,
 	userAgent: string,
 	ip: string,
@@ -89,7 +94,7 @@ function processTrackEventData(
 }
 
 async function processOutgoingLinkData(
-	linkData: any,
+	linkData: OutgoingLinkInput,
 	clientId: string
 ): Promise<CustomOutgoingLink> {
 	const timestamp = parseTimestamp(linkData.timestamp);
@@ -264,6 +269,13 @@ const app = new Elysia()
 		const log = useLogger();
 		log.set({ route: "events" });
 
+		const captureRejectedBody = () => {
+			const summary = summarizeRejectedBody(body);
+			if (summary) {
+				log.set(summary);
+			}
+		};
+
 		try {
 			const { clientId, userAgent, organizationId } = await validateRequest(
 				body,
@@ -274,12 +286,14 @@ const app = new Elysia()
 
 			if (!organizationId) {
 				log.set({ rejected: "missing_organization" });
+				captureRejectedBody();
 				throw basketErrors.ingestWebsiteMissingOrganization();
 			}
 
 			const parseResult = batchedCustomEventSpansSchema.safeParse(body);
 			if (!parseResult.success) {
 				log.set({ rejected: "schema" });
+				captureRejectedBody();
 				throw createIngestSchemaValidationError(parseResult.error.issues);
 			}
 
@@ -329,7 +343,8 @@ const app = new Elysia()
 				query,
 				request
 			);
-			const eventType = (body as any).type || "track";
+			const eventType =
+				(body as { type?: string } | null | undefined)?.type ?? "track";
 			log.set({ clientId, eventType });
 
 			if (eventType === "track") {
@@ -354,7 +369,7 @@ const app = new Elysia()
 					throw createIngestSchemaValidationError(parseResult.error.issues);
 				}
 
-				insertTrackEvent(body, clientId, userAgent, ip, request);
+				insertTrackEvent(parseResult.data, clientId, userAgent, ip, request);
 				return Response.json({ status: "success", type: "track" });
 			}
 
@@ -380,7 +395,7 @@ const app = new Elysia()
 					throw createIngestSchemaValidationError(parseResult.error.issues);
 				}
 
-				insertOutgoingLink(body, clientId, userAgent, ip);
+				insertOutgoingLink(parseResult.data, clientId, userAgent, ip);
 				return Response.json({ status: "success", type: "outgoing_link" });
 			}
 
@@ -464,7 +479,7 @@ const app = new Elysia()
 						}
 
 						const trackEvent = await processTrackEventData(
-							event,
+							parseResult.data,
 							clientId,
 							userAgent,
 							ip,
@@ -474,7 +489,7 @@ const app = new Elysia()
 						results.push({
 							status: "success",
 							type: "track",
-							eventId: event.eventId,
+							eventId: parseResult.data.eventId,
 						});
 					} else if (eventType === "outgoing_link") {
 						const botError = await checkForBot(
@@ -508,12 +523,15 @@ const app = new Elysia()
 							continue;
 						}
 
-						const linkEvent = await processOutgoingLinkData(event, clientId);
+						const linkEvent = await processOutgoingLinkData(
+							parseResult.data,
+							clientId
+						);
 						outgoingLinkEvents.push(linkEvent);
 						results.push({
 							status: "success",
 							type: "outgoing_link",
-							eventId: event.eventId,
+							eventId: parseResult.data.eventId,
 						});
 					} else {
 						results.push({

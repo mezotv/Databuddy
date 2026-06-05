@@ -1,6 +1,10 @@
 import { and, desc, eq, inArray, isNull } from "@databuddy/db";
 import { goals } from "@databuddy/db/schema";
-import { createDrizzleCache, redis } from "@databuddy/redis";
+import {
+	createDrizzleCache,
+	invalidateAgentContextSnapshotsForWebsite,
+	redis,
+} from "@databuddy/redis";
 import { GATED_FEATURES } from "@databuddy/shared/types/features";
 import { randomUUIDv7 } from "bun";
 import { z } from "zod";
@@ -18,6 +22,13 @@ import { requireFeatureWithLimit } from "../types/billing";
 const cache = createDrizzleCache({ redis, namespace: "goals" });
 
 const ANALYTICS_CACHE_TTL = 180;
+
+async function invalidateGoalsCache(websiteId: string): Promise<void> {
+	await Promise.allSettled([
+		cache.invalidateByTables(["goals"]),
+		invalidateAgentContextSnapshotsForWebsite(websiteId),
+	]);
+}
 
 const filterSchema = z.object({
 	field: z.string(),
@@ -94,7 +105,7 @@ const goalAnalyticsOutputSchema = z.object({
 
 const getDefaultDateRange = () => {
 	const endDate = new Date().toISOString().split("T")[0];
-	const startDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+	const startDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
 		.toISOString()
 		.split("T")[0];
 	return { startDate, endDate };
@@ -233,6 +244,8 @@ export const goalsRouter = {
 				})
 				.returning();
 
+			await invalidateGoalsCache(input.websiteId);
+
 			return newGoal;
 		}),
 
@@ -281,6 +294,8 @@ export const goalsRouter = {
 				.where(and(eq(goals.id, id), isNull(goals.deletedAt)))
 				.returning();
 
+			await invalidateGoalsCache(existingGoal.websiteId);
+
 			return updatedGoal;
 		}),
 
@@ -314,6 +329,8 @@ export const goalsRouter = {
 				.update(goals)
 				.set({ deletedAt: new Date(), isActive: false })
 				.where(and(eq(goals.id, input.id), isNull(goals.deletedAt)));
+
+			await invalidateGoalsCache(existingGoal.websiteId);
 
 			return { success: true };
 		}),
