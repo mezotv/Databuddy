@@ -1,17 +1,23 @@
 import type {
-	AnalyticsEvent,
-	CustomOutgoingLink,
-	ErrorSpanRow,
-	WebVitalsSpan,
-} from "@databuddy/db/clickhouse/schema";
+	ErrorSpansInsert,
+	EventsInsert,
+	OutgoingLinksInsert,
+	WebVitalsSpansInsert,
+} from "@databuddy/db/clickhouse/tables";
 import type { ErrorSpan, IndividualVital } from "@databuddy/validation";
 import { runFork, runPromise, send, sendBatch } from "@lib/producer";
-import { checkDuplicate, getDailySalt, saltAnonymousId } from "@lib/security";
+import {
+	checkDuplicate,
+	getDailySalt,
+	applyVisitorIdPrivacy,
+	shouldAnonymizeVisitorIds,
+} from "@lib/security";
 import { record } from "@lib/tracing";
-import { getGeo } from "@utils/ip-geo";
+import { extractTrustedClientIp, getGeo } from "@utils/ip-geo";
 import { parseUserAgent } from "@utils/user-agent";
 import {
 	sanitizeString,
+	sanitizeUrl,
 	VALIDATION_LIMITS,
 	validatePerformanceMetric,
 	validateSessionId,
@@ -44,13 +50,9 @@ export interface TrackEventContext {
 export function buildTrackEvent(
 	trackData: any,
 	ctx: TrackEventContext
-): AnalyticsEvent {
+): EventsInsert {
 	const timestamp =
 		typeof trackData.timestamp === "number" ? trackData.timestamp : ctx.now;
-	const sessionStartTime =
-		typeof trackData.sessionStartTime === "number"
-			? trackData.sessionStartTime
-			: ctx.now;
 
 	return {
 		id: randomUUIDv7(),
@@ -60,18 +62,21 @@ export function buildTrackEvent(
 			VALIDATION_LIMITS.SHORT_STRING_MAX_LENGTH
 		),
 		anonymous_id: ctx.anonymousId,
+		profile_id: trackData.profileId
+			? sanitizeString(
+					trackData.profileId,
+					VALIDATION_LIMITS.USER_ID_MAX_LENGTH
+				)
+			: undefined,
 		time: timestamp,
 		session_id: validateSessionId(trackData.sessionId),
-		event_type: "track",
-		event_id: ctx.eventId,
-		session_start_time: sessionStartTime,
 		timestamp,
-		referrer: sanitizeString(
+		referrer: sanitizeUrl(
 			trackData.referrer,
 			VALIDATION_LIMITS.STRING_MAX_LENGTH
 		),
-		url: sanitizeString(trackData.path, VALIDATION_LIMITS.STRING_MAX_LENGTH),
-		path: sanitizeString(trackData.path, VALIDATION_LIMITS.STRING_MAX_LENGTH),
+		url: sanitizeUrl(trackData.path, VALIDATION_LIMITS.STRING_MAX_LENGTH),
+		path: sanitizeUrl(trackData.path, VALIDATION_LIMITS.STRING_MAX_LENGTH),
 		title: sanitizeString(trackData.title, VALIDATION_LIMITS.STRING_MAX_LENGTH),
 		ip: ctx.geo.anonymizedIP || "",
 		user_agent: "",
@@ -85,13 +90,9 @@ export function buildTrackEvent(
 		country: ctx.geo.country || "",
 		region: ctx.geo.region || "",
 		city: ctx.geo.city || "",
-		screen_resolution: trackData.screen_resolution,
 		viewport_size: trackData.viewport_size,
 		language: trackData.language,
 		timezone: trackData.timezone,
-		connection_type: trackData.connection_type,
-		rtt: trackData.rtt,
-		downlink: trackData.downlink,
 		time_on_page: trackData.time_on_page,
 		scroll_depth: trackData.scroll_depth,
 		interaction_count: trackData.interaction_count,
@@ -102,14 +103,9 @@ export function buildTrackEvent(
 		utm_term: trackData.utm_term,
 		utm_content: trackData.utm_content,
 		gclid: trackData.gclid,
-		load_time: validatePerformanceMetric(trackData.load_time),
 		dom_ready_time: validatePerformanceMetric(trackData.dom_ready_time),
-		dom_interactive: validatePerformanceMetric(trackData.dom_interactive),
 		ttfb: validatePerformanceMetric(trackData.ttfb),
-		connection_time: validatePerformanceMetric(trackData.connection_time),
 		render_time: validatePerformanceMetric(trackData.render_time),
-		redirect_time: validatePerformanceMetric(trackData.redirect_time),
-		domain_lookup_time: validatePerformanceMetric(trackData.domain_lookup_time),
 		properties: trackData.properties
 			? JSON.stringify(trackData.properties)
 			: "{}",
@@ -122,7 +118,7 @@ export function insertTrackEvent(
 	clientId: string,
 	userAgent: string,
 	ip: string,
-	request?: Request
+	request: Request
 ): Promise<void> {
 	return record("insertTrackEvent", async () => {
 		const log = useLogger();
@@ -134,15 +130,26 @@ export function insertTrackEvent(
 			eventId = randomUUIDv7();
 		}
 
-		const [isDuplicate, geoData, salt] = await Promise.all([
+		const [isDuplicate, geoData] = await Promise.all([
 			checkDuplicate(eventId, "track"),
 			getGeo(ip, request),
-			getDailySalt(),
 		]);
 
 		if (isDuplicate) {
 			return;
 		}
+
+		const trustedCountry = extractTrustedClientIp(request)
+			? geoData.country
+			: undefined;
+		const anonymizeVisitorIds = shouldAnonymizeVisitorIds(
+			trackData.anonymizeVisitorIds,
+			trustedCountry
+		);
+		const [salt, ua] = await Promise.all([
+			anonymizeVisitorIds ? getDailySalt() : Promise.resolve(undefined),
+			parseUserAgent(userAgent),
+		]);
 
 		log.set({
 			event: { id: eventId, name: trackData.name, path: trackData.path },
@@ -153,15 +160,12 @@ export function insertTrackEvent(
 			},
 		});
 
-		let anonymousId = sanitizeString(
+		const anonymousId = applyVisitorIdPrivacy(
 			trackData.anonymousId,
-			VALIDATION_LIMITS.SHORT_STRING_MAX_LENGTH
+			anonymizeVisitorIds,
+			salt
 		);
-		if (anonymousId) {
-			anonymousId = saltAnonymousId(anonymousId, salt);
-		}
 
-		const ua = await parseUserAgent(userAgent);
 		const now = Date.now();
 
 		const trackEvent = buildTrackEvent(trackData, {
@@ -180,8 +184,7 @@ export function insertTrackEvent(
 export function insertOutgoingLink(
 	linkData: any,
 	clientId: string,
-	_userAgent: string,
-	_ip: string
+	request: Request
 ): Promise<void> {
 	return record("insertOutgoingLink", async () => {
 		const log = useLogger();
@@ -204,18 +207,27 @@ export function insertOutgoingLink(
 
 		const now = Date.now();
 
-		const salt = await getDailySalt();
-		const rawId = sanitizeString(
-			linkData.anonymousId,
-			VALIDATION_LIMITS.SHORT_STRING_MAX_LENGTH
+		const trustedIp = extractTrustedClientIp(request);
+		const visitorCountry =
+			linkData.anonymizeVisitorIds === "auto" && trustedIp
+				? (await getGeo(trustedIp, request)).country
+				: undefined;
+		const anonymizeVisitorIds = shouldAnonymizeVisitorIds(
+			linkData.anonymizeVisitorIds,
+			visitorCountry
 		);
+		const salt = anonymizeVisitorIds ? await getDailySalt() : undefined;
 
-		const outgoingLinkEvent: CustomOutgoingLink = {
+		const outgoingLinkEvent: OutgoingLinksInsert = {
 			id: randomUUIDv7(),
 			client_id: clientId,
-			anonymous_id: rawId ? saltAnonymousId(rawId, salt) : rawId,
+			anonymous_id: applyVisitorIdPrivacy(
+				linkData.anonymousId,
+				anonymizeVisitorIds,
+				salt
+			),
 			session_id: validateSessionId(linkData.sessionId),
-			href: sanitizeString(linkData.href, VALIDATION_LIMITS.PATH_MAX_LENGTH),
+			href: sanitizeUrl(linkData.href, VALIDATION_LIMITS.PATH_MAX_LENGTH),
 			text: sanitizeString(linkData.text, VALIDATION_LIMITS.TEXT_MAX_LENGTH),
 			properties: linkData.properties
 				? JSON.stringify(linkData.properties)
@@ -228,9 +240,7 @@ export function insertOutgoingLink(
 	});
 }
 
-export function insertTrackEventsBatch(
-	events: AnalyticsEvent[]
-): Promise<void> {
+export function insertTrackEventsBatch(events: EventsInsert[]): Promise<void> {
 	return record("insertTrackEventsBatch", async () => {
 		if (events.length === 0) {
 			return;
@@ -242,44 +252,48 @@ export function insertTrackEventsBatch(
 
 export function insertErrorSpans(
 	errors: ErrorSpan[],
-	clientId: string
+	clientId: string,
+	visitorCountry?: unknown
 ): Promise<void> {
 	return record("insertErrorSpans", async () => {
 		if (errors.length === 0) {
 			return;
 		}
 
-		const salt = await getDailySalt();
+		const shouldAnonymize = errors.map((error) =>
+			shouldAnonymizeVisitorIds(error.anonymizeVisitorIds, visitorCountry)
+		);
+		const salt = shouldAnonymize.includes(true)
+			? await getDailySalt()
+			: undefined;
 		const now = Date.now();
-		const spans: ErrorSpanRow[] = errors.map((error) => {
-			const rawId = sanitizeString(
+		const spans: ErrorSpansInsert[] = errors.map((error, index) => ({
+			client_id: clientId,
+			anonymous_id: applyVisitorIdPrivacy(
 				error.anonymousId,
-				VALIDATION_LIMITS.SHORT_STRING_MAX_LENGTH
-			);
-			return {
-				client_id: clientId,
-				anonymous_id: rawId ? saltAnonymousId(rawId, salt) : rawId,
-				session_id: validateSessionId(error.sessionId),
-				timestamp: typeof error.timestamp === "number" ? error.timestamp : now,
-				path: sanitizeString(error.path, VALIDATION_LIMITS.STRING_MAX_LENGTH),
-				message: sanitizeString(
-					error.message,
-					VALIDATION_LIMITS.STRING_MAX_LENGTH
-				),
-				filename: sanitizeString(
-					error.filename,
-					VALIDATION_LIMITS.STRING_MAX_LENGTH
-				),
-				lineno: error.lineno ?? undefined,
-				colno: error.colno ?? undefined,
-				stack: sanitizeString(error.stack, VALIDATION_LIMITS.STRING_MAX_LENGTH),
-				error_type:
-					sanitizeString(
-						error.errorType,
-						VALIDATION_LIMITS.SHORT_STRING_MAX_LENGTH
-					) || "Error",
-			};
-		});
+				shouldAnonymize[index] === true,
+				salt
+			),
+			session_id: validateSessionId(error.sessionId),
+			timestamp: typeof error.timestamp === "number" ? error.timestamp : now,
+			path: sanitizeUrl(error.path, VALIDATION_LIMITS.STRING_MAX_LENGTH),
+			message: sanitizeString(
+				error.message,
+				VALIDATION_LIMITS.STRING_MAX_LENGTH
+			),
+			filename: sanitizeString(
+				error.filename,
+				VALIDATION_LIMITS.STRING_MAX_LENGTH
+			),
+			lineno: error.lineno ?? undefined,
+			colno: error.colno ?? undefined,
+			stack: sanitizeString(error.stack, VALIDATION_LIMITS.STRING_MAX_LENGTH),
+			error_type:
+				sanitizeString(
+					error.errorType,
+					VALIDATION_LIMITS.SHORT_STRING_MAX_LENGTH
+				) || "Error",
+		}));
 
 		await runPromise(sendBatch("analytics-error-spans", spans));
 	});
@@ -287,37 +301,41 @@ export function insertErrorSpans(
 
 export function insertIndividualVitals(
 	vitals: IndividualVital[],
-	clientId: string
+	clientId: string,
+	visitorCountry?: unknown
 ): Promise<void> {
 	return record("insertIndividualVitals", async () => {
 		if (vitals.length === 0) {
 			return;
 		}
 
-		const salt = await getDailySalt();
+		const shouldAnonymize = vitals.map((vital) =>
+			shouldAnonymizeVisitorIds(vital.anonymizeVisitorIds, visitorCountry)
+		);
+		const salt = shouldAnonymize.includes(true)
+			? await getDailySalt()
+			: undefined;
 		const now = Date.now();
-		const spans: WebVitalsSpan[] = vitals.map((vital) => {
-			const rawId = sanitizeString(
+		const spans: WebVitalsSpansInsert[] = vitals.map((vital, index) => ({
+			client_id: clientId,
+			anonymous_id: applyVisitorIdPrivacy(
 				vital.anonymousId,
-				VALIDATION_LIMITS.SHORT_STRING_MAX_LENGTH
-			);
-			return {
-				client_id: clientId,
-				anonymous_id: rawId ? saltAnonymousId(rawId, salt) : rawId,
-				session_id: validateSessionId(vital.sessionId),
-				timestamp: typeof vital.timestamp === "number" ? vital.timestamp : now,
-				path: sanitizeString(vital.path, VALIDATION_LIMITS.STRING_MAX_LENGTH),
-				metric_name: vital.metricName,
-				metric_value: vital.metricValue,
-			};
-		});
+				shouldAnonymize[index] === true,
+				salt
+			),
+			session_id: validateSessionId(vital.sessionId),
+			timestamp: typeof vital.timestamp === "number" ? vital.timestamp : now,
+			path: sanitizeUrl(vital.path, VALIDATION_LIMITS.STRING_MAX_LENGTH),
+			metric_name: vital.metricName,
+			metric_value: vital.metricValue,
+		}));
 
 		await runPromise(sendBatch("analytics-vitals-spans", spans));
 	});
 }
 
 export function insertOutgoingLinksBatch(
-	events: CustomOutgoingLink[]
+	events: OutgoingLinksInsert[]
 ): Promise<void> {
 	return record("insertOutgoingLinksBatch", async () => {
 		if (events.length === 0) {
@@ -338,55 +356,63 @@ export function insertCustomEvents(
 		path?: string;
 		properties?: Record<string, unknown>;
 		anonymous_id?: string;
+		profile_id?: string;
 		session_id?: string;
+		anonymizeVisitorIds?: boolean | "auto";
 		source?: string;
-	}>
+	}>,
+	visitorCountry?: unknown
 ): Promise<void> {
 	return record("insertCustomEvents", async () => {
 		if (events.length === 0) {
 			return;
 		}
 
-		const salt = await getDailySalt();
+		const shouldAnonymize = events.map((event) =>
+			shouldAnonymizeVisitorIds(event.anonymizeVisitorIds, visitorCountry)
+		);
+		const salt = shouldAnonymize.includes(true)
+			? await getDailySalt()
+			: undefined;
 
-		const spans = events.map((event) => {
-			const rawId = event.anonymous_id
+		const spans = events.map((event, index) => ({
+			owner_id: event.owner_id,
+			website_id: event.website_id,
+			timestamp: event.timestamp,
+			event_name: sanitizeString(
+				event.event_name,
+				VALIDATION_LIMITS.SHORT_STRING_MAX_LENGTH
+			),
+			namespace: event.namespace
 				? sanitizeString(
-						event.anonymous_id,
+						event.namespace,
 						VALIDATION_LIMITS.SHORT_STRING_MAX_LENGTH
 					)
-				: undefined;
-
-			return {
-				owner_id: event.owner_id,
-				website_id: event.website_id,
-				timestamp: event.timestamp,
-				event_name: sanitizeString(
-					event.event_name,
-					VALIDATION_LIMITS.SHORT_STRING_MAX_LENGTH
-				),
-				namespace: event.namespace
-					? sanitizeString(
-							event.namespace,
-							VALIDATION_LIMITS.SHORT_STRING_MAX_LENGTH
-						)
-					: undefined,
-				path: event.path
-					? sanitizeString(event.path, VALIDATION_LIMITS.STRING_MAX_LENGTH)
-					: undefined,
-				properties: event.properties ? JSON.stringify(event.properties) : "{}",
-				anonymous_id: rawId ? saltAnonymousId(rawId, salt) : undefined,
-				session_id: event.session_id
-					? validateSessionId(event.session_id)
-					: undefined,
-				source: event.source
-					? sanitizeString(
-							event.source,
-							VALIDATION_LIMITS.SHORT_STRING_MAX_LENGTH
-						)
-					: undefined,
-			};
-		});
+				: undefined,
+			path: event.path
+				? sanitizeUrl(event.path, VALIDATION_LIMITS.STRING_MAX_LENGTH)
+				: undefined,
+			properties: event.properties ? JSON.stringify(event.properties) : "{}",
+			anonymous_id: event.anonymous_id
+				? applyVisitorIdPrivacy(
+						event.anonymous_id,
+						shouldAnonymize[index] === true,
+						salt
+					)
+				: undefined,
+			profile_id: event.profile_id
+				? sanitizeString(event.profile_id, VALIDATION_LIMITS.USER_ID_MAX_LENGTH)
+				: undefined,
+			session_id: event.session_id
+				? validateSessionId(event.session_id)
+				: undefined,
+			source: event.source
+				? sanitizeString(
+						event.source,
+						VALIDATION_LIMITS.SHORT_STRING_MAX_LENGTH
+					)
+				: undefined,
+		}));
 
 		await runPromise(sendBatch("analytics-custom-events", spans));
 	});

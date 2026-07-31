@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { redisStorage } from "@better-auth/redis-storage";
 import { sso } from "@better-auth/sso";
+import {
+	getCurrentAdapter,
+	runWithTransaction,
+} from "@better-auth/core/context";
 import { and, db, eq, like } from "@databuddy/db";
 // biome-ignore lint/performance/noNamespaceImport: Better Auth's Drizzle adapter expects a schema object map.
 import * as schema from "@databuddy/db/schema";
@@ -10,6 +14,7 @@ import {
 	verification as verificationTable,
 } from "@databuddy/db/schema";
 import {
+	AUTH_EMAIL_EXPIRY_SECONDS,
 	DeleteAccountEmail,
 	InvitationEmail,
 	MagicLinkEmail,
@@ -26,7 +31,18 @@ import {
 	invalidateOrganizationMembershipCaches,
 	ratelimit,
 } from "@databuddy/redis";
+import {
+	appendAuditEventInTransaction,
+	type AppendAuditEventInput,
+	createAuditEventPayload,
+} from "@databuddy/services/audit";
+import {
+	auditActions,
+	type AuditActionDefinition,
+	type AuditActor,
+} from "@databuddy/shared/audit";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
+import { APIError } from "better-auth/api";
 import { betterAuth } from "better-auth/minimal";
 import {
 	emailOTP,
@@ -39,6 +55,7 @@ import {
 import { log } from "evlog";
 import { Resend } from "resend";
 import { ac, admin, member, owner, viewer } from "./permissions";
+import { getAuthAuditContext } from "./audit-context";
 
 function generateOrgSlug(name: string): string {
 	const base = name
@@ -78,6 +95,14 @@ async function provisionDefaultOrg(input: {
 					role: "owner",
 					createdAt: new Date(),
 				});
+				await appendAuditEventInTransaction(tx, orgId, {
+					action: auditActions.ORGANIZATION_CREATED,
+					actor: betterAuthSystemActor,
+					operation: "auth.provisionDefaultOrganization",
+					source: "better_auth",
+					target: { id: orgId, displayName: orgName },
+					metadata: { provisionedDuringAccountSetup: true },
+				});
 			});
 			return orgId;
 		} catch (error) {
@@ -94,10 +119,10 @@ async function provisionDefaultOrg(input: {
 
 function getOrgNameFromUser(userName: string, email: string): string {
 	if (userName?.trim()) {
-		return `${userName.trim()}'s Workspace`;
+		return `${userName.trim()}'s Organization`;
 	}
 	const emailPrefix = email.split("@").at(0) ?? "user";
-	return `${emailPrefix}'s Workspace`;
+	return `${emailPrefix}'s Organization`;
 }
 
 function isProduction() {
@@ -113,6 +138,83 @@ function shouldRequireEmailVerification() {
 		return readBooleanEnv("REQUIRE_EMAIL_VERIFICATION");
 	}
 	return isProduction() && !isSelfHosted();
+}
+
+type EmailTemplate = Parameters<typeof render>[0];
+
+async function enforceAuthEmailRateLimit(input: {
+	callback: string;
+	email?: string;
+	key: string;
+	limit: number;
+	windowSeconds: number;
+}): Promise<void> {
+	const { success } = await ratelimit(
+		input.key,
+		input.limit,
+		input.windowSeconds
+	);
+	if (success) {
+		return;
+	}
+
+	log.warn({
+		service: "auth",
+		auth_rate_limited: true,
+		auth_callback: input.callback,
+		...(input.email ? { auth_rate_limit_email: input.email } : {}),
+	});
+	throw new APIError("TOO_MANY_REQUESTS", {
+		message: "Too many email requests. Please try again later.",
+	});
+}
+
+async function sendAuthEmail(input: {
+	subject: string;
+	template: EmailTemplate;
+	to: string;
+}): Promise<void> {
+	const apiKey = process.env.RESEND_API_KEY;
+	if (!apiKey) {
+		log.error({
+			service: "auth",
+			auth_email_delivery_failed: true,
+			email_provider_error: "RESEND_API_KEY is not configured",
+		});
+		throw new APIError("SERVICE_UNAVAILABLE", {
+			message: "Email delivery is temporarily unavailable. Please try again.",
+		});
+	}
+	const [html, text] = await Promise.all([
+		render(input.template),
+		render(input.template, { plainText: true }),
+	]);
+	const resend = new Resend(apiKey);
+	const result = await resend.emails.send({
+		from: config.email.from,
+		to: input.to,
+		subject: input.subject,
+		html,
+		text,
+	});
+
+	if (result.error) {
+		log.error({
+			service: "auth",
+			auth_email_delivery_failed: true,
+			email_provider_error: result.error.message,
+		});
+		throw new APIError("INTERNAL_SERVER_ERROR", {
+			message: "We could not send this email. Please try again.",
+		});
+	}
+}
+
+function formatInvitationRole(role: string | string[]): string {
+	const roles = Array.isArray(role) ? role : [role];
+	return roles
+		.map((value) => value.replaceAll(/[_-]+/g, " ").toLowerCase())
+		.join(", ");
 }
 
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL ?? "";
@@ -193,6 +295,45 @@ async function invalidateMemberCaches(member: {
 	}
 }
 
+const betterAuthSystemActor: AuditActor = {
+	type: "system",
+	id: "better-auth",
+	displayName: "Better Auth",
+};
+
+function toAuditActor(user: { id: string; name?: string | null }): AuditActor {
+	return {
+		type: "user",
+		id: user.id,
+		displayName: user.name ?? undefined,
+	};
+}
+
+async function recordAuthAudit<TAction extends AuditActionDefinition>(
+	organizationId: string,
+	input: Omit<
+		AppendAuditEventInput<TAction>,
+		"actor" | "operation" | "request" | "source"
+	>,
+	fallbackActor?: AuditActor
+): Promise<void> {
+	const context = getAuthAuditContext();
+	const adapter = await getCurrentAdapter(
+		(await auth.$context).adapter as Parameters<typeof getCurrentAdapter>[0]
+	);
+	await adapter.create({
+		model: "auditEvents",
+		data: createAuditEventPayload(organizationId, {
+			...input,
+			actor: context?.actor ?? fallbackActor ?? betterAuthSystemActor,
+			operation: context?.operation,
+			request: context?.request,
+			source: "better_auth",
+		}),
+		forceAllowId: true,
+	});
+}
+
 type AuthLogLevel = "info" | "warn" | "error" | "debug";
 
 function forwardAuthLog(
@@ -224,6 +365,7 @@ export const auth = betterAuth({
 	database: drizzleAdapter(db, {
 		provider: "pg",
 		schema,
+		transaction: true,
 	}),
 	secondaryStorage: redisStorage({
 		client: getRedisCache(),
@@ -254,6 +396,7 @@ export const auth = betterAuth({
 			"/forget-password": { window: 60, max: 3 },
 			"/magic-link/send": { window: 60, max: 3 },
 			"/email-otp/send": { window: 60, max: 3 },
+			"/organization/invite-member": { window: 3600, max: 5 },
 		},
 	},
 	account: {
@@ -366,13 +509,12 @@ export const auth = betterAuth({
 	user: {
 		deleteUser: {
 			enabled: true,
+			deleteTokenExpiresIn: AUTH_EMAIL_EXPIRY_SECONDS.accountDeletion,
 			sendDeleteAccountVerification: async ({ user: targetUser, url }) => {
-				const resend = new Resend(process.env.RESEND_API_KEY as string);
-				await resend.emails.send({
-					from: config.email.from,
+				await sendAuthEmail({
 					to: targetUser.email,
 					subject: "[Action required] Confirm account deletion",
-					html: await render(DeleteAccountEmail({ url })),
+					template: DeleteAccountEmail({ url }),
 				});
 			},
 			beforeDelete: async (userToDelete) => {
@@ -414,6 +556,8 @@ export const auth = betterAuth({
 		google: {
 			clientId: process.env.GOOGLE_CLIENT_ID as string,
 			clientSecret: process.env.GOOGLE_CLIENT_SECRET as string,
+			accessType: "offline",
+			prompt: "select_account consent",
 		},
 		github: {
 			clientId: process.env.GITHUB_CLIENT_ID as string,
@@ -426,59 +570,45 @@ export const auth = betterAuth({
 		maxPasswordLength: 128,
 		autoSignIn: false,
 		requireEmailVerification: shouldRequireEmailVerification(),
+		resetPasswordTokenExpiresIn: AUTH_EMAIL_EXPIRY_SECONDS.passwordReset,
 		revokeSessionsOnPasswordReset: true,
 		onPasswordReset: async ({ user }: { user: { id: string } }) => {
 			await purgeOutstandingResetTokens(user.id);
 		},
-		sendResetPassword: async ({ user, url }: { user: any; url: string }) => {
-			const { success } = await ratelimit(`reset:${user.email}`, 3, 3600);
-			if (!success) {
-				log.warn({
-					service: "auth",
-					auth_rate_limited: true,
-					auth_callback: "reset_password",
-					auth_rate_limit_email: user.email,
-				});
-				return;
-			}
+		sendResetPassword: async ({ user, url }) => {
+			await enforceAuthEmailRateLimit({
+				callback: "reset_password",
+				email: user.email,
+				key: `reset:${user.email}`,
+				limit: 3,
+				windowSeconds: 3600,
+			});
 
-			const resend = new Resend(process.env.RESEND_API_KEY as string);
-			await resend.emails.send({
-				from: config.email.from,
+			await sendAuthEmail({
 				to: user.email,
 				subject: "[Action required] Reset your password",
-				html: await render(ResetPasswordEmail({ url })),
+				template: ResetPasswordEmail({ url }),
 			});
 		},
 	},
 	emailVerification: {
+		expiresIn: AUTH_EMAIL_EXPIRY_SECONDS.emailVerification,
 		sendOnSignUp: process.env.NODE_ENV === "production",
 		sendOnSignIn: process.env.NODE_ENV === "production",
 		autoSignInAfterVerification: true,
-		sendVerificationEmail: async ({
-			user,
-			url,
-		}: {
-			user: any;
-			url: string;
-		}) => {
-			const { success } = await ratelimit(`verify:${user.email}`, 3, 900);
-			if (!success) {
-				log.warn({
-					service: "auth",
-					auth_rate_limited: true,
-					auth_callback: "verify_email",
-					auth_rate_limit_email: user.email,
-				});
-				return;
-			}
+		sendVerificationEmail: async ({ user, url }) => {
+			await enforceAuthEmailRateLimit({
+				callback: "verify_email",
+				email: user.email,
+				key: `verify:${user.email}`,
+				limit: 3,
+				windowSeconds: 900,
+			});
 
-			const resend = new Resend(process.env.RESEND_API_KEY as string);
-			await resend.emails.send({
-				from: config.email.from,
+			await sendAuthEmail({
 				to: user.email,
 				subject: "[Action required] Verify your email to get started",
-				html: await render(VerificationEmail({ url })),
+				template: VerificationEmail({ url }),
 			});
 		},
 	},
@@ -498,20 +628,15 @@ export const auth = betterAuth({
 			},
 		}),
 		emailOTP({
+			expiresIn: AUTH_EMAIL_EXPIRY_SECONDS.oneTimeCode,
 			async sendVerificationOTP({ email, otp, type }) {
-				const { success } = await ratelimit(`otp:${email}`, 3, 900);
-				if (!success) {
-					log.warn({
-						service: "auth",
-						auth_rate_limited: true,
-						auth_callback: "verification_otp",
-						auth_otp_type: type,
-						auth_rate_limit_email: email,
-					});
-					return;
-				}
-
-				const resend = new Resend(process.env.RESEND_API_KEY as string);
+				await enforceAuthEmailRateLimit({
+					callback: `verification_otp_${type}`,
+					email,
+					key: `otp:${email}`,
+					limit: 3,
+					windowSeconds: 900,
+				});
 
 				let subject = `${otp} is your verification code`;
 				if (type === "sign-in") {
@@ -522,38 +647,28 @@ export const auth = betterAuth({
 					subject = `${otp} — Reset your password`;
 				}
 
-				const otpHtml = await render(OtpEmail({ otp }));
-				resend.emails
-					.send({
-						from: config.email.from,
-						to: email,
-						subject,
-						html: otpHtml,
-					})
-					.catch((error) => {
-						console.error("Failed to send OTP email:", error);
-					});
+				await sendAuthEmail({
+					to: email,
+					subject,
+					template: OtpEmail({ otp, type }),
+				});
 			},
 		}),
 		magicLink({
+			expiresIn: AUTH_EMAIL_EXPIRY_SECONDS.magicLink,
 			sendMagicLink: async ({ email, url }) => {
-				const { success } = await ratelimit(`magic:${email}`, 3, 900);
-				if (!success) {
-					log.warn({
-						service: "auth",
-						auth_rate_limited: true,
-						auth_callback: "magic_link",
-						auth_rate_limit_email: email,
-					});
-					return;
-				}
+				await enforceAuthEmailRateLimit({
+					callback: "magic_link",
+					email,
+					key: `magic:${email}`,
+					limit: 3,
+					windowSeconds: 900,
+				});
 
-				const resend = new Resend(process.env.RESEND_API_KEY as string);
-				resend.emails.send({
-					from: config.email.from,
+				await sendAuthEmail({
 					to: email,
 					subject: "Your sign-in link for Databuddy",
-					html: await render(MagicLinkEmail({ url })),
+					template: MagicLinkEmail({ url }),
 				});
 			},
 		}),
@@ -566,6 +681,7 @@ export const auth = betterAuth({
 		twoFactor(),
 		organization({
 			creatorRole: "owner",
+			invitationExpiresIn: AUTH_EMAIL_EXPIRY_SECONDS.invitation,
 			teams: {
 				enabled: false,
 			},
@@ -577,10 +693,145 @@ export const auth = betterAuth({
 				viewer,
 			},
 			organizationHooks: {
-				afterAddMember: ({ member }) => invalidateMemberCaches(member),
-				afterCreateOrganization: ({ member }) => invalidateMemberCaches(member),
-				afterRemoveMember: ({ member }) => invalidateMemberCaches(member),
-				afterUpdateMemberRole: ({ member }) => invalidateMemberCaches(member),
+				afterAddMember: async ({ member, organization }) => {
+					await invalidateMemberCaches(member);
+					await recordAuthAudit(organization.id, {
+						action: auditActions.ORGANIZATION_MEMBER_ADDED,
+						target: { id: member.id },
+						changes: { role: { after: member.role } },
+						metadata: { memberUserId: member.userId },
+					});
+				},
+				afterCreateOrganization: async ({ member, organization, user }) => {
+					await invalidateMemberCaches(member);
+					await recordAuthAudit(
+						organization.id,
+						{
+							action: auditActions.ORGANIZATION_CREATED,
+							target: {
+								id: organization.id,
+								displayName: organization.name,
+							},
+							changes: { name: { after: organization.name } },
+						},
+						toAuditActor(user)
+					);
+				},
+				afterUpdateOrganization: async ({ organization, user }) => {
+					if (!organization) {
+						return;
+					}
+					await recordAuthAudit(
+						organization.id,
+						{
+							action: auditActions.ORGANIZATION_UPDATED,
+							target: {
+								id: organization.id,
+								displayName: organization.name,
+							},
+							metadata: { updated: true },
+						},
+						toAuditActor(user)
+					);
+				},
+				afterDeleteOrganization: async ({ organization, user }) => {
+					await recordAuthAudit(
+						organization.id,
+						{
+							action: auditActions.ORGANIZATION_DELETED,
+							target: {
+								id: organization.id,
+								displayName: organization.name,
+							},
+							changes: { deleted: { after: true } },
+						},
+						toAuditActor(user)
+					);
+				},
+				afterRemoveMember: async ({ member, organization }) => {
+					await invalidateMemberCaches(member);
+					await recordAuthAudit(organization.id, {
+						action: auditActions.ORGANIZATION_MEMBER_REMOVED,
+						target: { id: member.id },
+						changes: {
+							deleted: { after: true },
+							role: { before: member.role },
+						},
+						metadata: { memberUserId: member.userId },
+					});
+				},
+				afterUpdateMemberRole: async ({
+					member,
+					organization,
+					previousRole,
+				}) => {
+					await invalidateMemberCaches(member);
+					await recordAuthAudit(organization.id, {
+						action: auditActions.ORGANIZATION_MEMBER_ROLE_UPDATED,
+						target: { id: member.id },
+						changes: { role: { before: previousRole, after: member.role } },
+						metadata: { memberUserId: member.userId },
+					});
+				},
+				afterCreateInvitation: async ({
+					invitation,
+					inviter,
+					organization,
+				}) => {
+					await recordAuthAudit(
+						organization.id,
+						{
+							action: auditActions.ORGANIZATION_INVITATION_CREATED,
+							target: { id: invitation.id },
+							changes: { role: { after: invitation.role } },
+							metadata: { status: invitation.status },
+						},
+						toAuditActor(inviter)
+					);
+				},
+				afterAcceptInvitation: async ({ invitation, organization, user }) => {
+					await recordAuthAudit(
+						organization.id,
+						{
+							action: auditActions.ORGANIZATION_INVITATION_ACCEPTED,
+							target: { id: invitation.id },
+							changes: {
+								status: { before: "pending", after: invitation.status },
+							},
+						},
+						toAuditActor(user)
+					);
+				},
+				afterRejectInvitation: async ({ invitation, organization, user }) => {
+					await recordAuthAudit(
+						organization.id,
+						{
+							action: auditActions.ORGANIZATION_INVITATION_REJECTED,
+							target: { id: invitation.id },
+							changes: {
+								status: { before: "pending", after: invitation.status },
+							},
+						},
+						toAuditActor(user)
+					);
+				},
+				afterCancelInvitation: async ({
+					cancelledBy,
+					invitation,
+					organization,
+				}) => {
+					await recordAuthAudit(
+						organization.id,
+						{
+							action: auditActions.ORGANIZATION_INVITATION_CANCELLED,
+							target: { id: invitation.id },
+							changes: {
+								status: { before: "pending", after: invitation.status },
+							},
+						},
+						toAuditActor(cancelledBy)
+					);
+				},
 			},
 			sendInvitationEmail: async ({
 				email,
@@ -588,34 +839,17 @@ export const auth = betterAuth({
 				organization,
 				invitation,
 			}) => {
-				const { success } = await ratelimit(
-					`invite:${organization.id}`,
-					5,
-					3600
-				);
-				if (!success) {
-					log.warn({
-						service: "auth",
-						auth_rate_limited: true,
-						auth_callback: "invitation",
-						auth_organization_id: organization.id,
-					});
-					return;
-				}
-
 				const invitationLink = `${config.urls.dashboard}/invitations/${invitation.id}`;
-				const resend = new Resend(process.env.RESEND_API_KEY as string);
-				await resend.emails.send({
-					from: config.email.from,
+				await sendAuthEmail({
 					to: email,
 					subject: `${inviter.user.name ?? "Someone"} invited you to join ${organization.name}`,
-					html: await render(
-						InvitationEmail({
-							inviterName: inviter.user.name ?? "",
-							organizationName: organization.name,
-							invitationLink,
-						})
-					),
+					template: InvitationEmail({
+						inviterName: inviter.user.name ?? "",
+						organizationName: organization.name,
+						invitationLink,
+						recipientEmail: email,
+						role: formatInvitationRole(invitation.role),
+					}),
 				});
 			},
 		}),
@@ -625,6 +859,16 @@ export const auth = betterAuth({
 export const websitesApi = {
 	hasPermission: auth.api.hasPermission,
 };
+
+/** Runs a Better Auth request with its Drizzle adapter pinned to one transaction. */
+export async function runWithAuthTransaction<T>(
+	callback: () => Promise<T>
+): Promise<T> {
+	return runWithTransaction(
+		(await auth.$context).adapter as Parameters<typeof runWithTransaction>[0],
+		callback
+	);
+}
 
 export type User = (typeof auth)["$Infer"]["Session"]["user"];
 export type Session = (typeof auth)["$Infer"]["Session"];

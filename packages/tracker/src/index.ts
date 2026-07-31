@@ -1,10 +1,12 @@
 import { BaseTracker } from "./core/tracker";
-import type { TrackerOptions } from "./core/types";
+import type { ProfileTraits, TrackerOptions } from "./core/types";
 import {
+	clearStoredTrackingState,
 	generateUUIDv4,
 	getTrackerConfig,
 	isDebugMode,
 	isOptedOut,
+	sanitizePageUrl,
 } from "./core/utils";
 import { initErrorTracking } from "./plugins/errors";
 import { initInteractionTracking } from "./plugins/interactions";
@@ -21,6 +23,9 @@ export class Databuddy extends BaseTracker {
 
 	constructor(options: TrackerOptions) {
 		super(options);
+		if (typeof window !== "undefined" && isOptedOut()) {
+			return;
+		}
 
 		if (this.options.trackWebVitals) {
 			initWebVitalsTracking(this);
@@ -47,6 +52,11 @@ export class Databuddy extends BaseTracker {
 				track: (name: string, props?: Record<string, unknown>) =>
 					this.track(name, props),
 				screenView: (props?: Record<string, unknown>) => this.screenView(props),
+				identify: (profileId: string, traits?: ProfileTraits) =>
+					this.identify(profileId, traits),
+				setTraits: (traits: ProfileTraits) => this.setTraits(traits),
+				clearProfile: () => this.clearProfile(),
+				getProfileId: () => this.getProfileId(),
 				flush: () => {
 					Promise.all([
 						this.flushBatch(),
@@ -66,7 +76,7 @@ export class Databuddy extends BaseTracker {
 			window.databuddy = api;
 			window.db = window.databuddy;
 			if (isDebugMode()) {
-				(window as any).__tracker = this;
+				window.__tracker = this;
 			}
 		}
 	}
@@ -219,6 +229,10 @@ export class Databuddy extends BaseTracker {
 	}
 
 	private handlePageUnload() {
+		if (this.shouldBlockQueuedDelivery()) {
+			this.discardPendingEvents();
+			return;
+		}
 		this.flushQueueViaBeacon(this.trackQueue, "/track", () =>
 			this.flushTrack()
 		);
@@ -239,6 +253,8 @@ export class Databuddy extends BaseTracker {
 				eventId: generateUUIDv4(),
 				name: "page_exit",
 				anonymousId: this.anonymousId,
+				anonymizeVisitorIds: this.options.anonymizeVisitorIds,
+				profileId: this.profileId ?? undefined,
 				sessionId: this.sessionId,
 				timestamp: now,
 				...this.getBaseContext(),
@@ -272,7 +288,7 @@ export class Databuddy extends BaseTracker {
 	private trackPageExit(exitPath?: string) {
 		const now = Date.now();
 		this._trackInternal("page_exit", {
-			path: exitPath,
+			path: exitPath ? sanitizePageUrl(exitPath) : undefined,
 			timestamp: now,
 			time_on_page: Math.round((now - this.pageStartTime) / 1000),
 			scroll_depth: this.maxScrollDepth,
@@ -322,6 +338,8 @@ export class Databuddy extends BaseTracker {
 			eventId: generateUUIDv4(),
 			name,
 			anonymousId: this.anonymousId,
+			anonymizeVisitorIds: this.options.anonymizeVisitorIds,
+			profileId: this.profileId ?? undefined,
 			sessionId: this.sessionId,
 			timestamp: Date.now(),
 			...this.getBaseContext(),
@@ -357,6 +375,7 @@ export class Databuddy extends BaseTracker {
 	}
 
 	clear() {
+		this.discardPendingEvents();
 		this.globalProperties = {};
 		if (!this.isServer()) {
 			try {
@@ -367,6 +386,7 @@ export class Databuddy extends BaseTracker {
 			} catch {}
 		}
 		this.clearUrlParamStorage();
+		this.clearProfile();
 		this.anonymousId = this.generateAnonymousId();
 		this.sessionId = this.generateSessionId();
 		this.sessionStartTime = Date.now();
@@ -374,6 +394,10 @@ export class Databuddy extends BaseTracker {
 		this.lastPath = "";
 		this.interactionCount = 0;
 		this.maxScrollDepth = 0;
+	}
+
+	private discardPendingEvents(): void {
+		this.cancelPendingDelivery();
 	}
 
 	destroy() {
@@ -419,9 +443,14 @@ function initializeDatabuddy() {
 	}
 
 	if (isOptedOut()) {
+		clearStoredTrackingState();
 		window.databuddy = {
 			track: () => {},
 			screenView: () => {},
+			identify: () => {},
+			setTraits: () => {},
+			clearProfile: () => {},
+			getProfileId: () => null,
 			clear: () => {},
 			flush: () => {},
 			setGlobalProperties: () => {},
@@ -448,8 +477,10 @@ if (typeof window !== "undefined") {
 		window.databuddyOptedOut = true;
 		window.databuddyDisabled = true;
 		if (window.databuddy) {
+			window.databuddy.clear();
 			window.databuddy.options.disabled = true;
 		}
+		clearStoredTrackingState();
 	};
 
 	window.databuddyOptIn = () => {

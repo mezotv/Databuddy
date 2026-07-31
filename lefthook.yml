@@ -25,8 +25,16 @@ pre-commit:
         blocked_files="$(echo "{staged_files}" | tr ' ' '\n' | grep -vE '(^|/)\.env\.example$' || true)"
         [ -z "$blocked_files" ] || (echo "Blocked: staged file(s) may contain secrets:" && echo "$blocked_files" | sed 's/^/  - /' && exit 1)
     check-types:
-      glob: "**/*.{ts,tsx}"
-      run: bun run check-types
+      glob:
+        - "**/*.{ts,tsx}"
+        - "packages/db/src/clickhouse/schema/**/*.sql"
+      run: |
+        set -e
+        if git diff --cached --name-only | grep -qE '^packages/db/src/clickhouse/schema/.*\.sql$'; then
+          bun run generate-db
+          git add packages/db/src/clickhouse/schema/tables.generated.ts
+        fi
+        bun run check-types
     lockfile-check:
       glob:
         - "**/package.json"
@@ -37,8 +45,7 @@ pre-commit:
 commit-msg:
   commands:
     enforce-format:
-      run: |
-        head -1 {1} | grep -qE '^(feat|fix|refactor|chore|docs|test|style|perf|ci|build|revert)\(.+\): .+' || (echo "Commit message must match: <type>(<scope>): <description>" && exit 1)
+      run: bun scripts/enforce-commit-format.ts {1}
 
 pre-push:
   parallel: true

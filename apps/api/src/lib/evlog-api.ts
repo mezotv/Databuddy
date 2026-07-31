@@ -15,7 +15,7 @@ import { createDrainPipeline } from "evlog/pipeline";
 const batchedAxiomDrain = createDrainPipeline<DrainContext>({
 	batch: { size: 50, intervalMs: 5000 },
 	maxBufferSize: 2000,
-})(createAxiomDrain());
+})(createAxiomDrain({ apiKey: process.env.AXIOM_TOKEN }));
 
 const batchedSuperlogDrain = createBatchedSuperlogDrain();
 
@@ -30,26 +30,37 @@ const devFsLogsDir = join(
 const useLocalEvlogFiles =
 	process.env.NODE_ENV === "development" || readBooleanEnv("API_EVLOG_FS");
 
+const drainToAxiom =
+	process.env.NODE_ENV !== "development" && Boolean(process.env.AXIOM_TOKEN);
+
 const devFsDrain = useLocalEvlogFiles
 	? createFsDrain({ dir: devFsLogsDir, pretty: false })
 	: null;
 
 const DURATION_REGEX = /^([\d.]+)(ms|s)$/;
 
-/**
- * Before Axiom: fix `error` string vs object collision; downgrade 4xx to warn.
- */
+function stripErrorCauseData(err: Record<string, unknown>): void {
+	const cause = err.cause;
+	if (cause && typeof cause === "object" && !Array.isArray(cause)) {
+		(cause as Record<string, unknown>).data = undefined;
+	}
+}
+
 function normalizeWideEventForAxiom(event: Record<string, unknown>): void {
 	if (typeof event.error === "string") {
 		event.error_message = event.error;
 		event.error = undefined;
 	}
 
+	const err = event.error;
+	if (err && typeof err === "object" && !Array.isArray(err)) {
+		stripErrorCauseData(err as Record<string, unknown>);
+	}
+
 	if (event.level !== "error") {
 		return;
 	}
 
-	const err = event.error;
 	if (!err || typeof err !== "object" || Array.isArray(err)) {
 		return;
 	}
@@ -85,7 +96,9 @@ export async function apiLoggerDrain(ctx: DrainContext): Promise<void> {
 	if (devFsDrain) {
 		await devFsDrain(ctx);
 	}
-	batchedAxiomDrain(ctx);
+	if (drainToAxiom) {
+		batchedAxiomDrain(ctx);
+	}
 	batchedSuperlogDrain?.(ctx);
 }
 

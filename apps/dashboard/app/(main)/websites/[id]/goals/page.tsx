@@ -1,8 +1,19 @@
 "use client";
 
+import { insightGoalEditChangesSchema } from "@databuddy/shared/insights";
 import { GATED_FEATURES } from "@databuddy/shared/types/features";
-import { useParams } from "next/navigation";
-import { useMemo, useState } from "react";
+import { Button } from "@databuddy/ui";
+import { DeleteDialog } from "@databuddy/ui/client";
+import { ArrowClockwiseIcon, PlusIcon, TargetIcon } from "@databuddy/ui/icons";
+import { useAtomValue } from "jotai";
+import {
+	useParams,
+	usePathname,
+	useRouter,
+	useSearchParams,
+} from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 import { FeatureGate } from "@/components/feature-gate";
 import { List } from "@/components/ui/composables/list";
 import { useAutocompleteData } from "@/hooks/use-autocomplete";
@@ -14,12 +25,12 @@ import {
 	useGoals,
 } from "@/hooks/use-goals";
 import { TopBar } from "@/components/layout/top-bar";
+import { dynamicQueryFiltersAtom } from "@/stores/jotai/filterAtoms";
+import type { DynamicQueryFilter, GoalFilter } from "@/types/api";
 import { EditGoalDialog } from "./_components/edit-goal-dialog";
 import { GoalItemSkeleton } from "./_components/goal-item";
 import { GoalsList } from "./_components/goals-list";
-import { PlusIcon, TrendDownIcon } from "@databuddy/ui/icons";
-import { Button, Card } from "@databuddy/ui";
-import { DeleteDialog } from "@databuddy/ui/client";
+import { cn } from "@/lib/utils";
 
 function GoalsListSkeleton() {
 	return (
@@ -31,19 +42,49 @@ function GoalsListSkeleton() {
 	);
 }
 
+const filterOperatorMap = {
+	contains: "contains",
+	eq: "equals",
+	in: "in",
+	ne: "not_equals",
+	not_contains: "not_contains",
+	not_in: "not_in",
+	starts_with: "starts_with",
+} satisfies Record<DynamicQueryFilter["operator"], GoalFilter["operator"]>;
+
+function toGoalFilters(filters: DynamicQueryFilter[]): GoalFilter[] {
+	return filters.map((filter) => ({
+		field: filter.field,
+		operator: filterOperatorMap[filter.operator],
+		value: Array.isArray(filter.value)
+			? filter.value.map(String)
+			: String(filter.value),
+	}));
+}
+
 export default function GoalsPage() {
 	const { id } = useParams();
 	const websiteId = id as string;
-	const [isDialogOpen, setIsDialogOpen] = useState(false);
-	const [editingGoal, setEditingGoal] = useState<Goal | null>(null);
+	const pathname = usePathname();
+	const router = useRouter();
+	const searchParams = useSearchParams();
+	const isDemoRoute = pathname.startsWith("/demo/");
 	const [deletingGoalId, setDeletingGoalId] = useState<string | null>(null);
+	const [editingGoal, setEditingGoal] = useState<Goal | null>();
 
 	const { dateRange } = useDateFilters();
+	const globalFilters = useAtomValue(dynamicQueryFiltersAtom);
+	const goalFilters = useMemo(
+		() => toGoalFilters(globalFilters),
+		[globalFilters]
+	);
 
 	const {
 		data: goals,
-		isLoading: goalsLoading,
-		error: goalsError,
+		listOutcome,
+		isFetching,
+		error,
+		refreshAction,
 		createGoal,
 		updateGoal,
 		deleteGoal,
@@ -51,10 +92,77 @@ export default function GoalsPage() {
 		isUpdating,
 	} = useGoals(websiteId);
 
+	useEffect(() => {
+		const command = searchParams.get("command");
+		const goalId = searchParams.get("goalId");
+		if (isDemoRoute) {
+			return;
+		}
+
+		if (
+			!goalId ||
+			(command !== "edit-goal" && command !== "delete-goal") ||
+			isFetching ||
+			listOutcome.status === "loading" ||
+			listOutcome.status === "error"
+		) {
+			return;
+		}
+
+		const goal = goals.find((candidate) => candidate.id === goalId);
+		if (!goal) {
+			toast.error("This goal no longer exists");
+		} else if (command === "edit-goal") {
+			const proposal = insightGoalEditChangesSchema.safeParse({
+				description: searchParams.get("description"),
+				name: searchParams.get("name"),
+			});
+			if (proposal.success) {
+				const proposedGoal = {
+					...goal,
+					description: proposal.data.description ?? goal.description,
+					name: proposal.data.name ?? goal.name,
+				};
+				if (
+					proposedGoal.description === goal.description &&
+					proposedGoal.name === goal.name
+				) {
+					toast.success("This goal already matches the recommendation");
+				} else {
+					setEditingGoal(proposedGoal);
+				}
+			} else {
+				toast.error("Databuddy's suggested changes could not be loaded");
+			}
+		} else {
+			setDeletingGoalId(goal.id);
+		}
+
+		const params = new URLSearchParams(searchParams.toString());
+		params.delete("command");
+		params.delete("description");
+		params.delete("goalId");
+		params.delete("name");
+		const query = params.toString();
+		router.replace(query ? `${pathname}?${query}` : pathname, {
+			scroll: false,
+		});
+	}, [
+		goals,
+		isDemoRoute,
+		isFetching,
+		listOutcome.status,
+		pathname,
+		router,
+		searchParams,
+	]);
+
 	const goalIds = useMemo(() => goals.map((goal) => goal.id), [goals]);
 
 	const { data: goalAnalytics, isLoading: analyticsLoading } =
-		useBulkGoalAnalytics(websiteId, goalIds, dateRange);
+		useBulkGoalAnalytics(websiteId, goalIds, dateRange, goalFilters, {
+			enabled: goalIds.length > 0,
+		});
 
 	const autocompleteQuery = useAutocompleteData(websiteId);
 
@@ -89,10 +197,12 @@ export default function GoalsPage() {
 					websiteId,
 				} as CreateGoalData);
 			}
-			setIsDialogOpen(false);
-			setEditingGoal(null);
+			setEditingGoal(undefined);
 		} catch (error) {
 			console.error("Failed to save goal:", error);
+			toast.error(
+				error instanceof Error ? error.message : "Could not save goal"
+			);
 		}
 	};
 
@@ -102,31 +212,13 @@ export default function GoalsPage() {
 			setDeletingGoalId(null);
 		} catch (error) {
 			console.error("Failed to delete goal:", error);
+			toast.error(
+				error instanceof Error ? error.message : "Could not delete goal"
+			);
 		}
 	};
 
-	if (goalsError) {
-		return (
-			<div className="p-4">
-				<Card className="border-destructive/20 bg-destructive/5">
-					<Card.Content className="pt-6">
-						<div className="flex items-center gap-2">
-							<TrendDownIcon
-								className="size-5 text-destructive"
-								weight="duotone"
-							/>
-							<p className="font-medium text-destructive">
-								Error loading goal data
-							</p>
-						</div>
-						<p className="mt-2 text-destructive/80 text-sm">
-							{goalsError.message}
-						</p>
-					</Card.Content>
-				</Card>
-			</div>
-		);
-	}
+	const deletingGoal = goals.find((goal) => goal.id === deletingGoalId) ?? null;
 
 	return (
 		<FeatureGate feature={GATED_FEATURES.GOALS}>
@@ -136,57 +228,77 @@ export default function GoalsPage() {
 				</TopBar.Title>
 				<TopBar.Actions>
 					<Button
-						onClick={() => {
-							setEditingGoal(null);
-							setIsDialogOpen(true);
-						}}
+						aria-label="Refresh"
+						disabled={isFetching}
+						onClick={refreshAction}
 						size="sm"
+						variant="secondary"
 					>
-						<PlusIcon className="size-4 shrink-0" />
-						Create Goal
+						<ArrowClockwiseIcon
+							className={cn("size-4 shrink-0", isFetching && "animate-spin")}
+						/>
 					</Button>
+					{!isDemoRoute && (
+						<Button onClick={() => setEditingGoal(null)} size="sm">
+							<PlusIcon className="size-4 shrink-0" />
+							Create Goal
+						</Button>
+					)}
 				</TopBar.Actions>
 
 				<div className="min-h-0 flex-1 overflow-y-auto overscroll-none">
-					{goalsLoading ? (
-						<GoalsListSkeleton />
-					) : (
-						<GoalsList
-							analyticsLoading={analyticsLoading}
-							goalAnalytics={goalAnalytics}
-							goals={goals}
-							isLoading={goalsLoading}
-							onCreateGoal={() => {
-								setEditingGoal(null);
-								setIsDialogOpen(true);
-							}}
-							onDeleteGoal={(goalId) => setDeletingGoalId(goalId)}
-							onEditGoal={(goal) => {
-								setEditingGoal(goal);
-								setIsDialogOpen(true);
-							}}
-						/>
-					)}
+					<List.Content
+						emptyProps={{
+							action: isDemoRoute
+								? undefined
+								: {
+										label: "Create a goal",
+										onClick: () => setEditingGoal(null),
+									},
+							description:
+								"Track single-step conversions like signups, purchases, or activation events.",
+							icon: <TargetIcon className="size-6" weight="duotone" />,
+							title: "No goals yet",
+						}}
+						errorProps={{
+							action: { label: "Retry", onClick: () => refreshAction() },
+							description:
+								error?.message ??
+								"Something went wrong while loading goal data.",
+							icon: <TargetIcon className="size-6" weight="duotone" />,
+							title: "Failed to load goals",
+						}}
+						loading={<GoalsListSkeleton />}
+						outcome={listOutcome}
+					>
+						{(items) => (
+							<GoalsList
+								analyticsLoading={analyticsLoading}
+								goalAnalytics={goalAnalytics}
+								goals={items}
+								onDeleteGoal={(goalId) => setDeletingGoalId(goalId)}
+								onEditGoal={setEditingGoal}
+								readOnly={isDemoRoute}
+							/>
+						)}
+					</List.Content>
 				</div>
 
-				{isDialogOpen && (
+				{!isDemoRoute && editingGoal !== undefined && (
 					<EditGoalDialog
 						autocompleteData={autocompleteQuery.data}
 						goal={editingGoal}
-						isOpen={isDialogOpen}
+						isOpen
 						isSaving={isCreating || isUpdating}
-						onClose={() => {
-							setIsDialogOpen(false);
-							setEditingGoal(null);
-						}}
+						onClose={() => setEditingGoal(undefined)}
 						onSave={handleSaveGoal}
 					/>
 				)}
 
-				{deletingGoalId && (
+				{!isDemoRoute && deletingGoalId && (
 					<DeleteDialog
 						confirmLabel="Delete Goal"
-						description="Are you sure you want to delete this goal? This action cannot be undone and will permanently remove all associated analytics data."
+						description={`Delete ${deletingGoal?.name ?? "this goal"}? Historical events remain in your analytics, but the goal will no longer be available for reporting.`}
 						isOpen={!!deletingGoalId}
 						onClose={() => setDeletingGoalId(null)}
 						onConfirm={() => {
@@ -194,7 +306,7 @@ export default function GoalsPage() {
 								return handleDeleteGoal(deletingGoalId);
 							}
 						}}
-						title="Delete Goal"
+						title={`Delete ${deletingGoal?.name ?? "goal"}`}
 					/>
 				)}
 			</div>

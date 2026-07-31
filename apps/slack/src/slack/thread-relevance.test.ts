@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
+import * as agentModule from "@databuddy/ai/agent";
 import type {
 	SlackThreadReplyMessage,
 	SlackThreadReplyRelevance,
@@ -10,6 +11,7 @@ let capturedModelInput: SlackThreadReplyRelevanceInput | null = null;
 let modelDecision: SlackThreadReplyRelevance | null = null;
 
 mock.module("@databuddy/ai/agent", () => ({
+	...agentModule,
 	classifySlackThreadReplyRelevance: async (
 		input: SlackThreadReplyRelevanceInput
 	) => {
@@ -176,30 +178,8 @@ describe("Slack thread reply relevance", () => {
 		});
 	});
 
-	it("falls back conservatively for very short replies when the model is unavailable", async () => {
-		await expect(
-			decideWithThread("both", [
-				{
-					text: "Which website should I use?",
-					userId: "UBOT",
-				},
-			])
-		).resolves.toMatchObject({
-			reason: "ambiguous",
-			shouldReply: false,
-			source: "fallback",
-		});
-	});
-
-	it("falls back conservatively for longer unmentioned replies when the model is unavailable", async () => {
-		await expect(
-			decideWithThread("databuddy is gonna make qais mad", [
-				{
-					text: "I can explain the metric if someone asks.",
-					userId: "UBOT",
-				},
-			])
-		).resolves.toMatchObject({
+	it("falls back conservatively for unmentioned replies when the model is unavailable", async () => {
+		await expect(decide("databuddy is gonna make qais mad")).resolves.toMatchObject({
 			reason: "ambiguous",
 			shouldReply: false,
 			source: "fallback",

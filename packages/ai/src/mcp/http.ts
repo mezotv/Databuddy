@@ -1,4 +1,8 @@
-import { hasKeyScope } from "@databuddy/api-keys/resolve";
+import {
+	getAccessibleWebsiteIds,
+	hasKeyScope,
+	hasWebsiteScope,
+} from "@databuddy/api-keys/resolve";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { AnySchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
@@ -11,7 +15,6 @@ import type {
 } from "../ai/mcp/define-tool";
 import { createMcpTools } from "../ai/mcp/tools";
 import { GUIDE_MARKDOWN, GUIDE_URI, MCP_INSTRUCTIONS } from "./guide";
-import { registerDatabuddyPrompts } from "./prompts";
 
 const DEFAULT_MCP_SERVER_NAME = "databuddy";
 const DEFAULT_MCP_SERVER_VERSION = "1.0.0";
@@ -25,9 +28,14 @@ export interface DatabuddyMcpHttpOptions extends McpRequestContext {
 const UNAUTH_BODY_PARSE_CAP = 4096;
 
 export async function createMcpUnauthorizedResponse(
-	request: Request
+	request: Request,
+	options?: { resourceMetadataUrl?: string }
 ): Promise<Response> {
 	mergeWideEvent({ mcp_auth: "unauthorized" });
+
+	const resourceMetadata = options?.resourceMetadataUrl
+		? `, resource_metadata="${options.resourceMetadataUrl}"`
+		: "";
 
 	return Response.json(
 		{
@@ -42,8 +50,7 @@ export async function createMcpUnauthorizedResponse(
 		{
 			status: 401,
 			headers: {
-				"WWW-Authenticate":
-					'Bearer realm="databuddy", error="invalid_token", error_description="API key required (x-api-key or Authorization: Bearer)"',
+				"WWW-Authenticate": `Bearer realm="databuddy", error="invalid_token", error_description="API key required (x-api-key or Authorization: Bearer)"${resourceMetadata}`,
 			},
 		}
 	);
@@ -78,13 +85,12 @@ export async function handleDatabuddyMcpRequest(
 			version: options.serverVersion ?? DEFAULT_MCP_SERVER_VERSION,
 		},
 		{
-			capabilities: { tools: {}, resources: {}, prompts: {} },
+			capabilities: { tools: {}, resources: {} },
 			instructions: MCP_INSTRUCTIONS,
 		}
 	);
 
 	registerGuideResource(server);
-	registerDatabuddyPrompts(server);
 
 	for (const tool of createMcpTools(options)) {
 		if (apiKeyCanCallTool(options.apiKey, tool)) {
@@ -120,7 +126,12 @@ function apiKeyCanCallTool(
 		// Session-authenticated callers fall through to downstream role checks.
 		return true;
 	}
-	return required.every((scope) => hasKeyScope(apiKey, scope));
+	if (required.every((scope) => hasKeyScope(apiKey, scope))) {
+		return true;
+	}
+	return getAccessibleWebsiteIds(apiKey).some((websiteId) =>
+		required.every((scope) => hasWebsiteScope(apiKey, websiteId, scope))
+	);
 }
 
 function registerTool(server: McpServer, tool: RegisteredMcpTool): void {
@@ -142,7 +153,7 @@ function registerTool(server: McpServer, tool: RegisteredMcpTool): void {
 function titleFromName(name: string): string {
 	// MCP tool names are validated against /^[a-z][a-z0-9_]*$/ in defineMcpTool,
 	// so split always returns at least one non-empty leading-alpha word.
-	const [head, ...rest] = name.split("_");
+	const [head = name, ...rest] = name.split("_");
 	return [head.charAt(0).toUpperCase() + head.slice(1), ...rest].join(" ");
 }
 

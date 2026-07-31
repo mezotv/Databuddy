@@ -18,6 +18,7 @@ export type SlackSlashRespond = (
 ) => Promise<unknown>;
 
 export interface SlackAgentClient {
+	apiCall: WebClient["apiCall"];
 	chat: Pick<WebClient["chat"], "appendStream" | "startStream" | "stopStream">;
 	conversations: Pick<
 		WebClient["conversations"],

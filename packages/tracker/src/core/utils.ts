@@ -21,6 +21,131 @@ export const isLocalhost = () => {
 const DATA_ATTR_REGEX = /-./g;
 const NUMBER_REGEX = /^\d+$/;
 
+function parseConfigValue(
+	value: string,
+	emptyStringIsTrue = false
+): boolean | number | string {
+	if (value === "true" || (emptyStringIsTrue && value === "")) {
+		return true;
+	}
+	if (value === "false") {
+		return false;
+	}
+	return NUMBER_REGEX.test(value) ? Number(value) : value;
+}
+
+function parseJsonAttribute(value: string): unknown {
+	try {
+		return JSON.parse(value);
+	} catch {
+		return [];
+	}
+}
+
+export function maskPathname(
+	pathname: string,
+	patterns: readonly string[] | undefined
+): string {
+	if (!patterns) {
+		return pathname;
+	}
+	for (const pattern of patterns) {
+		if (typeof pattern !== "string" || !pattern.includes("*")) {
+			continue;
+		}
+		const masked = applyMaskPattern(pathname, pattern);
+		if (masked !== null) {
+			return masked;
+		}
+	}
+	return pathname;
+}
+
+export function buildPagePath(
+	origin: string,
+	pathname: string,
+	patterns?: readonly string[]
+): string {
+	return `${origin}${maskPathname(pathname, patterns)}`;
+}
+
+export function sanitizePageUrl(value: string): string {
+	if (!value) {
+		return "";
+	}
+	try {
+		const url = new URL(value);
+		if (!(url.protocol === "http:" || url.protocol === "https:")) {
+			return "";
+		}
+		return `${url.origin}${url.pathname}`;
+	} catch {
+		return "";
+	}
+}
+
+function applyMaskPattern(pathname: string, pattern: string): string | null {
+	const normalized =
+		pattern.length > 1 && pattern.endsWith("/")
+			? pattern.slice(0, -1)
+			: pattern;
+	const patternSegments = normalized.split("/");
+	const pathSegments = pathname.split("/");
+	const masked: string[] = [];
+
+	for (let i = 0; i < patternSegments.length; i++) {
+		const patternSegment = patternSegments[i];
+		if (patternSegment === "**") {
+			if (pathSegments.slice(i).some((segment) => segment.length > 0)) {
+				masked.push("*");
+			}
+			return masked.join("/") || "/";
+		}
+		if (i >= pathSegments.length) {
+			return null;
+		}
+		if (!patternSegment.includes("*")) {
+			if (patternSegment !== pathSegments[i]) {
+				return null;
+			}
+			masked.push(pathSegments[i]);
+			continue;
+		}
+		if (!segmentMatches(patternSegment, pathSegments[i])) {
+			return null;
+		}
+		masked.push(patternSegment);
+	}
+
+	masked.push(...pathSegments.slice(patternSegments.length));
+	return masked.join("/");
+}
+
+function segmentMatches(patternSegment: string, pathSegment: string): boolean {
+	const parts = patternSegment.split("*");
+	const prefix = parts[0] ?? "";
+	const suffix = parts.at(-1) ?? "";
+	if (
+		pathSegment.length < prefix.length + suffix.length ||
+		!(pathSegment.startsWith(prefix) && pathSegment.endsWith(suffix))
+	) {
+		return false;
+	}
+	let cursor = prefix.length;
+	const end = pathSegment.length - suffix.length;
+	for (const fragment of parts.slice(1, -1)) {
+		if (fragment === "") {
+			continue;
+		}
+		const found = pathSegment.indexOf(fragment, cursor);
+		if (found === -1 || found + fragment.length > end) {
+			return false;
+		}
+		cursor = found + fragment.length;
+	}
+	return true;
+}
+
 export const generateUUIDv4 = () => {
 	if (typeof crypto !== "undefined" && crypto.randomUUID) {
 		return crypto.randomUUID();
@@ -43,6 +168,12 @@ export function isOptedOut(): boolean {
 	if (typeof window === "undefined") {
 		return false;
 	}
+	if (
+		typeof navigator !== "undefined" &&
+		(navigator.globalPrivacyControl === true || navigator.doNotTrack === "1")
+	) {
+		return true;
+	}
 	try {
 		return (
 			localStorage.getItem("databuddy_opt_out") === "true" ||
@@ -54,6 +185,31 @@ export function isOptedOut(): boolean {
 		return (
 			window.databuddyOptedOut === true || window.databuddyDisabled === true
 		);
+	}
+}
+
+export function clearStoredTrackingState(): void {
+	if (typeof window === "undefined") {
+		return;
+	}
+	if (typeof localStorage !== "undefined") {
+		try {
+			localStorage.removeItem("did");
+			localStorage.removeItem("did_profile");
+			localStorage.removeItem("did_params");
+		} catch {
+			// Local storage may be blocked by the browser.
+		}
+	}
+	if (typeof sessionStorage !== "undefined") {
+		try {
+			sessionStorage.removeItem("did_session");
+			sessionStorage.removeItem("did_session_timestamp");
+			sessionStorage.removeItem("did_session_start");
+			sessionStorage.removeItem("did_profile_sent");
+		} catch {
+			// Session storage may be blocked by the browser.
+		}
 	}
 }
 
@@ -78,48 +234,28 @@ export function getTrackerConfig(): TrackerOptions {
 	}
 
 	const globalConfig = window.databuddyConfig || {};
-	let config: TrackerOptions = { clientId: "", ...globalConfig };
+	const config: TrackerOptions & Record<string, unknown> = {
+		clientId: "",
+		...globalConfig,
+	};
 
 	if (script) {
-		const dataAttributes: Record<string, any> = {};
 		for (const attr of script.attributes) {
 			if (attr.name.startsWith("data-")) {
 				const key = attr.name
 					.slice(5)
 					.replace(DATA_ATTR_REGEX, (x: string) => x[1].toUpperCase());
-				let value: any = attr.value;
-
-				if (key === "skipPatterns" || key === "maskPatterns") {
-					try {
-						value = JSON.parse(value);
-					} catch {
-						value = [];
-					}
-				} else if (value === "true" || value === "") {
-					value = true;
-				} else if (value === "false") {
-					value = false;
-				} else if (NUMBER_REGEX.test(value)) {
-					value = Number(value);
-				}
-
-				dataAttributes[key] = value;
+				config[key] =
+					key === "skipPatterns" || key === "maskPatterns"
+						? parseJsonAttribute(attr.value)
+						: parseConfigValue(attr.value, true);
 			}
 		}
-		config = { ...config, ...dataAttributes };
 
 		try {
 			const srcUrl = new URL(script.src);
 			srcUrl.searchParams.forEach((value, key) => {
-				if (value === "true") {
-					(config as any)[key] = true;
-				} else if (value === "false") {
-					(config as any)[key] = false;
-				} else if (NUMBER_REGEX.test(value)) {
-					(config as any)[key] = Number(value);
-				} else {
-					(config as any)[key] = value;
-				}
+				config[key] = parseConfigValue(value);
 			});
 		} catch {
 			/* ignore */

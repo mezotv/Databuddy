@@ -2,6 +2,7 @@ import { CheckIcon, XMarkIcon as XIcon } from "@databuddy/ui/icons";
 import Link from "next/link";
 import { SciFiButton } from "@/components/landing/scifi-btn";
 import { GatedFeaturePricingRows } from "./gated-feature-rows";
+import { trackPricingPlanClick } from "./track-pricing";
 import type { NormalizedPlan } from "./types";
 
 interface Props {
@@ -101,10 +102,10 @@ export function PlansComparisonTable({ plans }: Props) {
 								</td>
 							))}
 						</tr>
-						{/* Agent credits per month */}
+						{/* Investigation credits per month */}
 						<tr className="border-border border-t hover:bg-card/10">
 							<td className="px-4 py-3 text-muted-foreground text-sm sm:px-5 lg:px-6">
-								Agent credits / month
+								Investigation credits / month
 							</td>
 							{plans.map((p) => (
 								<td
@@ -121,10 +122,10 @@ export function PlansComparisonTable({ plans }: Props) {
 								</td>
 							))}
 						</tr>
-						{/* Daily bonus credits */}
+						{/* Daily investigation credit bonus */}
 						<tr className="border-border border-t hover:bg-card/10">
 							<td className="px-4 py-3 text-muted-foreground text-sm sm:px-5 lg:px-6">
-								Daily bonus credits
+								Daily investigation credit bonus
 							</td>
 							{plans.map((p) => (
 								<td
@@ -244,16 +245,26 @@ export function PlansComparisonTable({ plans }: Props) {
 										{p.id === "enterprise" ? (
 											<Link
 												data-plan={p.id}
-												data-track="pricing_plan_clicked"
 												href="/contact"
+												onClick={() =>
+													trackPricingPlanClick(
+														p.id,
+														"pricing_comparison_table"
+													)
+												}
 											>
 												CONTACT US
 											</Link>
 										) : (
 											<Link
 												data-plan={p.id}
-												data-track="pricing_plan_clicked"
 												href={`https://app.databuddy.cc/register?plan=${p.id}`}
+												onClick={() =>
+													trackPricingPlanClick(
+														p.id,
+														"pricing_comparison_table"
+													)
+												}
 												rel="noopener noreferrer"
 												target="_blank"
 											>
@@ -295,9 +306,10 @@ export function PlansComparisonTable({ plans }: Props) {
 					quota.
 				</p>
 				<p>
-					<span className="text-foreground">Agent credits</span> power
-					Databunny, the AI assistant that analyzes your data, answers
-					questions, and surfaces insights automatically.
+					<span className="text-foreground">Investigation credits</span> pay for
+					the work Databunny performs. They are not a message count: simple
+					checks use fewer credits; deeper investigations, replies, and rechecks
+					use more.
 				</p>
 				<p>
 					<span className="text-foreground">Unlimited seats & sites.</span> Team

@@ -13,7 +13,6 @@
     "./redis": "./redis.ts",
     "./stream-buffer": "./stream-buffer.ts",
     "./drizzle-cache": "./drizzle-cache.ts",
-    "./insights-queue": "./insights-queue.ts",
     "./cache-invalidation": "./cache-invalidation.ts",
     "./links-cache": "./links-cache.ts",
     "./click-dedup": "./click-dedup.ts",
@@ -24,11 +23,11 @@
     "test": "bun test --max-concurrency=1 *.test.ts"
   },
   "dependencies": {
-    "bullmq": "^5.66.5",
+    "bullmq": "^5.78.0",
     "ioredis": "^5.8.2"
   },
   "devDependencies": {
-    "@types/node": "^20.11.19",
+    "@types/node": "^26.0.0",
     "typescript": "catalog:"
   },
   "description": "Redis caching and pub/sub utilities for Databuddy"

@@ -5,6 +5,7 @@ import {
 	CalendarIcon,
 	CodeIcon,
 	CompassIcon,
+	CreditCardIcon,
 	DatabaseIcon,
 	FileTextIcon,
 	FlagIcon,
@@ -147,6 +148,11 @@ export const contents: SidebarSection[] = [
 				],
 			},
 			{
+				title: "Payments",
+				href: "/docs/Integrations/payments",
+				icon: CreditCardIcon,
+			},
+			{
 				title: "Static Sites & Tools",
 				icon: GlobeSimpleIcon,
 				children: [
@@ -188,6 +194,11 @@ export const contents: SidebarSection[] = [
 				title: "Configuration",
 				href: "/docs/sdk/configuration",
 				icon: GearIcon,
+			},
+			{
+				title: "Identify Users",
+				href: "/docs/sdk/identify-users",
+				icon: IdBadgeIcon,
 			},
 			{
 				title: "Web SDKs",
@@ -290,10 +301,6 @@ export const contents: SidebarSection[] = [
 					{
 						title: "Link Analytics",
 						href: "/docs/api/links",
-					},
-					{
-						title: "Custom Queries",
-						href: "/docs/api/custom-queries",
 					},
 					{
 						title: "Error Handling",

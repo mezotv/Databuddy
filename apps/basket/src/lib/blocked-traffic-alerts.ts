@@ -1,4 +1,4 @@
-import type { BlockedTraffic } from "@databuddy/db/clickhouse/schema";
+import type { BlockedTrafficInsert } from "@databuddy/db/clickhouse/tables";
 import { chQuery } from "@databuddy/db/clickhouse";
 import {
 	db,
@@ -15,6 +15,19 @@ import {
 	matchesTrackingBlockIgnoredOrigin,
 } from "@databuddy/shared/tracking-blocks";
 import { captureError } from "@lib/tracing";
+import { log } from "evlog";
+
+let warnedEmailUnconfigured = false;
+function warnBlockedTrafficEmailUnconfigured(): void {
+	if (warnedEmailUnconfigured) {
+		return;
+	}
+	warnedEmailUnconfigured = true;
+	log.warn({
+		message:
+			"Blocked traffic email alerts disabled: RESEND_API_KEY is not configured",
+	});
+}
 
 const ALERT_WINDOW_MINUTES = 15;
 const RECENT_SUCCESS_MINUTES = 30;
@@ -45,16 +58,16 @@ export interface BlockedTrafficAlertDecision {
 	severity: "critical" | "warning";
 }
 
-function getAlertOrigin(event: BlockedTraffic): string {
+function getAlertOrigin(event: BlockedTrafficInsert): string {
 	return event.origin?.trim() || "";
 }
 
-function getAlertOriginKey(event: BlockedTraffic): string {
+function getAlertOriginKey(event: BlockedTrafficInsert): string {
 	return encodeURIComponent(getAlertOrigin(event) || "missing-origin");
 }
 
 function getBlockedTrafficSource(
-	event: Pick<BlockedTraffic, "origin" | "referrer">
+	event: Pick<BlockedTrafficInsert, "origin" | "referrer">
 ): string | null {
 	return event.origin || event.referrer || null;
 }
@@ -68,7 +81,7 @@ export function matchesTrackingAlertIgnoredOrigin(
 
 export function shouldIgnoreBlockedTrafficAlertEvent(
 	event: Pick<
-		BlockedTraffic,
+		BlockedTrafficInsert,
 		"block_reason" | "client_id" | "origin" | "referrer"
 	>
 ): boolean {
@@ -81,7 +94,7 @@ export function shouldIgnoreBlockedTrafficAlertEvent(
 	return isIgnoredTrackingBlockOrigin(getBlockedTrafficSource(event));
 }
 
-function buildRecommendedFix(event: BlockedTraffic): string {
+function buildRecommendedFix(event: BlockedTrafficInsert): string {
 	const host = getTrackingBlockOriginHost(event.origin ?? null);
 	if (event.block_reason === "origin_not_authorized") {
 		return host
@@ -101,7 +114,9 @@ function buildDashboardUrl(clientId: string, reason: string): string {
 	return `${config.urls.dashboard}/websites/${clientId}/settings/${section}`;
 }
 
-async function incrementWindowCounter(event: BlockedTraffic): Promise<number> {
+async function incrementWindowCounter(
+	event: BlockedTrafficInsert
+): Promise<number> {
 	const key = `blocked-traffic-alert:count:${event.client_id}:${event.block_reason}:${getAlertOriginKey(event)}`;
 	const count = await redis.incr(key);
 	if (count === 1) {
@@ -124,7 +139,9 @@ async function getTrackingHealth(
 	return rows[0] ?? { baselineEvents: 0, recentEvents: 0 };
 }
 
-async function getPreviousBlockedCount(event: BlockedTraffic): Promise<number> {
+async function getPreviousBlockedCount(
+	event: BlockedTrafficInsert
+): Promise<number> {
 	const rows = await chQuery<PreviousBlockedCountRow>(
 		`SELECT count() AS previousBlocked
 		FROM analytics.blocked_traffic
@@ -176,15 +193,24 @@ export function shouldEvaluateBlockedTrafficAlert(
 	);
 }
 
+export function requireBlockedTrafficEmailApiKey(
+	apiKey: string | undefined
+): string {
+	if (!apiKey) {
+		throw new Error("Blocked traffic email delivery is not configured");
+	}
+	return apiKey;
+}
+
 function cooldownKey(
-	event: BlockedTraffic,
+	event: BlockedTrafficInsert,
 	kind: BlockedTrafficAlertDecision["kind"]
 ): string {
 	return `blocked-traffic-alert:sent:${event.client_id}:${event.block_reason}:${getAlertOriginKey(event)}:${kind}`;
 }
 
 async function reserveCooldown(
-	event: BlockedTraffic,
+	event: BlockedTrafficInsert,
 	kind: BlockedTrafficAlertDecision["kind"],
 	settings: EmailNotificationSettings
 ): Promise<string | null> {
@@ -194,17 +220,15 @@ async function reserveCooldown(
 	return reserved === "OK" ? key : null;
 }
 
-async function getOwnerEmail(
-	ownerId: string
-): Promise<{ email: string; name: string | null } | null> {
+async function getOwnerEmail(ownerId: string): Promise<string | null> {
 	const row = await db.query.user.findFirst({
 		where: { id: ownerId },
-		columns: { email: true, name: true },
+		columns: { email: true },
 	});
 	if (!row?.email) {
 		return null;
 	}
-	return { email: row.email, name: row.name ?? null };
+	return row.email;
 }
 
 async function getOrganizationEmailSettings(
@@ -223,7 +247,7 @@ async function getOrganizationEmailSettings(
 
 function isAlertMutedBySettings(input: {
 	decision: BlockedTrafficAlertDecision;
-	event: BlockedTraffic;
+	event: BlockedTrafficInsert;
 	settings: EmailNotificationSettings;
 }): boolean {
 	const tracking = input.settings.trackingHealth;
@@ -252,16 +276,13 @@ function isAlertMutedBySettings(input: {
 async function sendAlertEmail(input: {
 	context: BlockedTrafficAlertContext;
 	decision: BlockedTrafficAlertDecision;
-	event: BlockedTraffic;
+	event: BlockedTrafficInsert;
 	trackingHealth: TrackingHealthCounts;
-	ownerEmail: string;
+	recipientEmail: string;
 	previousBlocked: number;
 	windowBlockedCount: number;
 }): Promise<void> {
-	const apiKey = process.env.RESEND_API_KEY;
-	if (!apiKey) {
-		return;
-	}
+	const apiKey = requireBlockedTrafficEmailApiKey(config.email.resendApiKey);
 
 	const siteLabel =
 		input.context.websiteName ||
@@ -273,25 +294,27 @@ async function sendAlertEmail(input: {
 			? `[Action required] Tracking may be blocked for ${siteLabel}`
 			: `[Databuddy] Blocked tracking increased for ${siteLabel}`;
 
-	const html = await render(
-		BlockedTrafficAlertEmail({
-			baselineEvents: input.trackingHealth.baselineEvents,
-			baselineHours: BASELINE_SUCCESS_HOURS,
-			blockReason: input.event.block_reason,
-			blockedCount: input.windowBlockedCount,
-			dashboardUrl: buildDashboardUrl(
-				input.event.client_id || "",
-				input.event.block_reason
-			),
-			fix: buildRecommendedFix(input.event),
-			origin: input.event.origin ?? null,
-			previousBlockedCount: input.previousBlocked,
-			recentEvents: input.trackingHealth.recentEvents,
-			severity: input.decision.severity,
-			siteLabel,
-			windowMinutes: ALERT_WINDOW_MINUTES,
-		})
-	);
+	const email = BlockedTrafficAlertEmail({
+		baselineEvents: input.trackingHealth.baselineEvents,
+		baselineHours: BASELINE_SUCCESS_HOURS,
+		blockReason: input.event.block_reason,
+		blockedCount: input.windowBlockedCount,
+		dashboardUrl: buildDashboardUrl(
+			input.event.client_id || "",
+			input.event.block_reason
+		),
+		fix: buildRecommendedFix(input.event),
+		origin: input.event.origin ?? null,
+		previousBlockedCount: input.previousBlocked,
+		recentEvents: input.trackingHealth.recentEvents,
+		severity: input.decision.severity,
+		siteLabel,
+		windowMinutes: ALERT_WINDOW_MINUTES,
+	});
+	const [html, text] = await Promise.all([
+		render(email),
+		render(email, { plainText: true }),
+	]);
 
 	const response = await fetch("https://api.resend.com/emails", {
 		method: "POST",
@@ -301,9 +324,10 @@ async function sendAlertEmail(input: {
 		},
 		body: JSON.stringify({
 			from: config.email.alertsFrom,
-			to: input.ownerEmail,
+			to: input.recipientEmail,
 			subject,
 			html,
+			text,
 		}),
 	});
 
@@ -313,7 +337,7 @@ async function sendAlertEmail(input: {
 }
 
 async function maybeSendBlockedTrafficAlertAsync(
-	event: BlockedTraffic,
+	event: BlockedTrafficInsert,
 	context: BlockedTrafficAlertContext = {}
 ): Promise<void> {
 	if (shouldIgnoreBlockedTrafficAlertEvent(event)) {
@@ -350,8 +374,13 @@ async function maybeSendBlockedTrafficAlertAsync(
 		return;
 	}
 
-	const owner = await getOwnerEmail(context.ownerId);
-	if (!owner) {
+	const recipientEmail = await getOwnerEmail(context.ownerId);
+	if (!recipientEmail) {
+		return;
+	}
+
+	if (!config.email.resendApiKey) {
+		warnBlockedTrafficEmailUnconfigured();
 		return;
 	}
 
@@ -366,7 +395,7 @@ async function maybeSendBlockedTrafficAlertAsync(
 			decision,
 			event,
 			trackingHealth,
-			ownerEmail: owner.email,
+			recipientEmail,
 			previousBlocked,
 			windowBlockedCount,
 		});
@@ -377,7 +406,7 @@ async function maybeSendBlockedTrafficAlertAsync(
 }
 
 export function queueBlockedTrafficAlert(
-	event: BlockedTraffic,
+	event: BlockedTrafficInsert,
 	context?: BlockedTrafficAlertContext
 ): void {
 	maybeSendBlockedTrafficAlertAsync(event, context).catch((error) => {

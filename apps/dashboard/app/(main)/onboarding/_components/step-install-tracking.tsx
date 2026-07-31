@@ -1,6 +1,5 @@
 "use client";
 
-import { track } from "@databuddy/sdk";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { createHighlighterCoreSync } from "shiki/core";
@@ -11,6 +10,7 @@ import tsx from "shiki/langs/tsx.mjs";
 import vesper from "shiki/themes/vesper.mjs";
 import { toast } from "sonner";
 import { orpc } from "@/lib/orpc";
+import { APP_EVENTS, trackAppEvent } from "@/lib/app-events";
 import { Badge, Button, Card } from "@databuddy/ui";
 import { Tabs } from "@databuddy/ui/client";
 import {
@@ -32,9 +32,52 @@ import {
 	generateNpmCode,
 	generateScriptTag,
 } from "../../websites/[id]/_components/utils/code-generators";
+import { RECOMMENDED_DEFAULTS } from "../../websites/[id]/_components/utils/tracking-defaults";
 
 // TODO: Replace with published skill URL once available
 const SKILL_URL = "https://github.com/databuddy-cc/skill";
+
+async function copyTextToClipboard(value: string): Promise<boolean> {
+	if (!(value && typeof window !== "undefined")) {
+		return false;
+	}
+
+	try {
+		if (navigator.clipboard?.writeText) {
+			await navigator.clipboard.writeText(value);
+			return true;
+		}
+	} catch {
+		// Firefox can reject clipboard writes outside a granted permission flow.
+	}
+
+	const textarea = document.createElement("textarea");
+	textarea.value = value;
+	textarea.setAttribute("readonly", "true");
+	textarea.style.left = "-9999px";
+	textarea.style.position = "fixed";
+	textarea.style.top = "0";
+
+	const selection = document.getSelection();
+	const selectedRange =
+		selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+
+	document.body.appendChild(textarea);
+	textarea.focus();
+	textarea.select();
+
+	try {
+		return document.execCommand("copy");
+	} catch {
+		return false;
+	} finally {
+		textarea.remove();
+		if (selection && selectedRange) {
+			selection.removeAllRanges();
+			selection.addRange(selectedRange);
+		}
+	}
+}
 
 function generateAgentPrompt(websiteId: string): string {
 	return `Add Databuddy analytics to this repository. Client ID: ${websiteId}
@@ -81,21 +124,20 @@ All options work as React/Vue props or \`data-*\` attributes on the script tag.
 | Option | Type | Default | What it does |
 |--------|------|---------|-------------|
 | trackWebVitals | bool | false | Core Web Vitals (LCP, CLS, INP, TTFB) |
-| trackPerformance | bool | true | Page load timing |
 | trackErrors | bool | false | JavaScript errors and exceptions |
 | trackHashChanges | bool | false | URL hash changes (SPA routing) |
 | trackAttributes | bool | false | Auto-track elements with data-track attribute |
 | trackOutgoingLinks | bool | false | Clicks to external sites |
 | trackInteractions | bool | false | Button clicks and form submissions |
-| trackSessions | bool | true | Session tracking (automatic) |
-| trackScreenViews | bool | true | Page view tracking (automatic) |
 | disabled | bool | false | Master kill switch |
 | samplingRate | 0-1 | 1.0 | Fraction of events to capture |
 | enableBatching | bool | true | Batch events before sending |
 | batchSize | num | 10 | Events per batch |
-| batchTimeout | num | 2000 | Max ms before flushing batch |
+| batchTimeout | num | 5000 | Max ms before flushing batch |
 | enableRetries | bool | true | Retry failed requests |
 | maxRetries | num | 3 | Max retry attempts |
+
+Page views and sessions are tracked automatically; they are not configuration options.
 
 Enable what makes sense for this website. A good starting point:
 \`\`\`tsx
@@ -134,40 +176,7 @@ Use snake_case event names. Track decisions and milestones (signup_completed, pu
 
 **Events not appearing in dashboard**: Data typically appears within 30 seconds. Check the Network tab for failed requests to basket.databuddy.cc. Verify the Client ID matches. Check for console errors.
 
-**If another analytics tool is present**: Both can run in parallel. No conflicts. Optionally disable the other tool's page view tracking if Databuddy handles it.
-
-## Report Back — Required
-
-After installation (success or failure), send a POST to report what happened. This helps us improve the setup experience.
-
-\`\`\`bash
-curl -X POST https://api.databuddy.cc/public/v1/agent-telemetry \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "websiteId": "${websiteId}",
-    "agent": "claude",
-    "status": "success",
-    "framework": "nextjs",
-    "installMethod": "sdk",
-    "stepsCompleted": ["install", "mount", "env-var", "verify"],
-    "issues": [],
-    "metadata": {}
-  }'
-\`\`\`
-
-Fields:
-- **websiteId**: "${websiteId}"
-- **agent**: Which tool ran this (claude, cursor, copilot, windsurf, other)
-- **status**: "success" | "partial" | "failed"
-- **framework**: What framework was detected (nextjs, react, vue, vanilla, etc.)
-- **installMethod**: "sdk" or "script-tag"
-- **stepsCompleted**: Array of steps that succeeded: "install", "mount", "env-var", "verify"
-- **issues**: Array of problems encountered, e.g. [{"type": "csp", "detail": "blocked cdn.databuddy.cc", "resolved": true}]
-  - Common issue types: csp, adblocker, domain-mismatch, script-blocked, build-error, type-error, env-var-missing
-- **errorMessage**: Final error message if status is "failed"
-- **metadata**: Any extra context (package manager used, versions, etc.)
-
-Always send this report, even on failure. It's a single fire-and-forget POST.`;
+**If another analytics tool is present**: Both can run in parallel. No conflicts. Optionally disable the other tool's page view tracking if Databuddy handles it.`;
 }
 
 function ClaudeLogo({ color }: { color: string }) {
@@ -232,26 +241,6 @@ const AI_TOOLS = [
 		icon: WindsurfLogo,
 	},
 ];
-
-const DEFAULT_TRACKING_OPTIONS = {
-	disabled: false,
-	trackHashChanges: false,
-	trackAttributes: false,
-	trackOutgoingLinks: false,
-	trackInteractions: false,
-	trackPerformance: false,
-	trackWebVitals: false,
-	trackErrors: false,
-	trackSessions: true,
-	trackScreenViews: false,
-	enableBatching: true,
-	enableRetries: true,
-	batchSize: 10,
-	batchTimeout: 5000,
-	maxRetries: 3,
-	initialRetryDelay: 1000,
-	samplingRate: 1,
-};
 
 const highlighter = createHighlighterCoreSync({
 	themes: [vesper],
@@ -336,8 +325,8 @@ export function StepInstallTracking({
 	const [copiedBlockId, setCopiedBlockId] = useState<string | null>(null);
 	const [isRefreshing, setIsRefreshing] = useState(false);
 
-	const trackingCode = generateScriptTag(websiteId, DEFAULT_TRACKING_OPTIONS);
-	const npmCode = generateNpmCode(websiteId, DEFAULT_TRACKING_OPTIONS);
+	const trackingCode = generateScriptTag(websiteId, RECOMMENDED_DEFAULTS);
+	const npmCode = generateNpmCode(websiteId, RECOMMENDED_DEFAULTS);
 
 	const { data: trackingSetupData, refetch: refetchTrackingSetup } = useQuery({
 		...orpc.websites.isTrackingSetup.queryOptions({ input: { websiteId } }),
@@ -346,39 +335,34 @@ export function StepInstallTracking({
 
 	const isSetup = trackingSetupData?.tracking_setup ?? false;
 
-	const handleCopy = (code: string, blockId: string, message: string) => {
-		try {
-			navigator.clipboard.writeText(code);
-			setCopiedBlockId(blockId);
-			toast.success(message);
-			setTimeout(() => setCopiedBlockId(null), COPY_SUCCESS_TIMEOUT);
-			try {
-				track("onboarding_tracking_copied", {
-					block: blockId,
-					method: AI_TOOLS.some((t) => t.id === blockId)
-						? "ai"
-						: blockId.includes("install")
-							? "sdk"
-							: "script",
-				});
-			} catch {}
-		} catch {
-			toast.error("Failed to copy to clipboard");
+	const handleCopy = async (code: string, blockId: string, message: string) => {
+		const copied = await copyTextToClipboard(code);
+		if (!copied) {
+			toast.error("Copy failed - select and copy manually.");
+			return;
 		}
+
+		setCopiedBlockId(blockId);
+		toast.success(message);
+		setTimeout(() => setCopiedBlockId(null), COPY_SUCCESS_TIMEOUT);
+		trackAppEvent(APP_EVENTS.onboardingTrackingCopied, {
+			block: blockId,
+			method: AI_TOOLS.some((t) => t.id === blockId)
+				? "ai"
+				: blockId.includes("install")
+					? "sdk"
+					: "script",
+		});
 	};
 
 	const handleCheckStatus = async () => {
 		setIsRefreshing(true);
-		try {
-			track("onboarding_tracking_check_status");
-		} catch {}
+		trackAppEvent(APP_EVENTS.onboardingTrackingCheckStatus);
 		try {
 			const result = await refetchTrackingSetup();
 			if (result.data?.tracking_setup) {
 				toast.success("Tracking verified! Data is flowing.");
-				try {
-					track("onboarding_tracking_verified");
-				} catch {}
+				trackAppEvent(APP_EVENTS.onboardingTrackingVerified);
 				onComplete();
 			} else {
 				toast.info("No tracking detected yet. Check your installation.");

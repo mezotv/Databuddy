@@ -7,9 +7,7 @@ import { z } from "zod";
 import { rpcError } from "../errors";
 import { publicProcedure, trackedProcedure } from "../orpc";
 import {
-	hasApiKeyOrgAccess,
-	withFlagsWrite,
-	withWebsiteRead,
+	withPublicWorkspace,
 	withWorkspace,
 } from "../procedures/with-workspace";
 import { invalidateFlagEvaluationCaches } from "../utils/flags";
@@ -26,11 +24,6 @@ const flagsCache = createDrizzleCache({
 const CACHE_DURATION = 60;
 
 const listSchema = z.object({
-	websiteId: z.string(),
-});
-
-const getByIdSchema = z.object({
-	id: z.string(),
 	websiteId: z.string(),
 });
 
@@ -61,16 +54,12 @@ const targetGroupOutputSchema = z.record(z.string(), z.unknown());
 
 const successOutputSchema = z.object({ success: z.literal(true) });
 
-interface TargetGroupWithRules {
-	rules?: unknown;
-	[key: string]: unknown;
-}
-
-function sanitizeGroupForDemo<T extends TargetGroupWithRules>(group: T): T {
-	return {
-		...group,
-		rules: Array.isArray(group.rules) ? [] : group.rules,
-	};
+function requireAuthedTargetGroupRead(workspace: { tier: "authed" | "demo" }) {
+	if (workspace.tier === "demo") {
+		throw rpcError.unauthorized(
+			"Target group definitions require authenticated organization access"
+		);
+	}
 }
 
 export const targetGroupsRouter = {
@@ -86,22 +75,15 @@ export const targetGroupsRouter = {
 		.input(listSchema)
 		.output(z.array(targetGroupOutputSchema))
 		.handler(async ({ context, input }) => {
-			const workspace = await withWorkspace(context, {
+			const workspace = await withPublicWorkspace(context, {
 				websiteId: input.websiteId,
 				permissions: ["read"],
-				allowPublicAccess: true,
 			});
 
-			const sanitize =
-				workspace.tier === "demo" && !hasApiKeyOrgAccess(workspace, context);
+			requireAuthedTargetGroupRead(workspace);
 
 			return targetGroupsCache.withCache({
-				key: scopedCacheKey(
-					"list",
-					workspace,
-					`website:${input.websiteId}`,
-					`sanitize:${sanitize}`
-				),
+				key: scopedCacheKey("list", workspace, `website:${input.websiteId}`),
 				ttl: CACHE_DURATION,
 				tables: ["target_groups"],
 				queryFn: async () => {
@@ -116,50 +98,7 @@ export const targetGroupsRouter = {
 						)
 						.orderBy(desc(targetGroups.createdAt));
 
-					return sanitize ? groupsList.map(sanitizeGroupForDemo) : groupsList;
-				},
-			});
-		}),
-
-	getById: publicProcedure
-		.route({
-			description:
-				"Returns a single target group by id. Requires website read permission.",
-			method: "POST",
-			path: "/target-groups/getById",
-			summary: "Get target group",
-			tags: ["Target Groups"],
-		})
-		.input(getByIdSchema)
-		.output(targetGroupOutputSchema)
-		.use(withWebsiteRead)
-		.handler(async ({ context, input }) => {
-			const { workspace } = context;
-			const sanitize =
-				workspace.tier === "demo" && !hasApiKeyOrgAccess(workspace, context);
-
-			return await targetGroupsCache.withCache({
-				key: scopedCacheKey(
-					"byId",
-					workspace,
-					`website:${input.websiteId}`,
-					`id:${input.id}`,
-					`sanitize:${sanitize}`
-				),
-				ttl: CACHE_DURATION,
-				tables: ["target_groups"],
-				queryFn: async () => {
-					const row = await context.db.query.targetGroups.findFirst({
-						where: {
-							id: input.id,
-							websiteId: input.websiteId,
-							deletedAt: { isNull: true },
-						},
-					});
-					if (!row) {
-						throw rpcError.notFound("Target group", input.id);
-					}
-					return sanitize ? sanitizeGroupForDemo(row) : row;
+					return groupsList;
 				},
 			});
 		}),
@@ -176,8 +115,9 @@ export const targetGroupsRouter = {
 		.input(createSchema)
 		.output(targetGroupOutputSchema)
 		.handler(async ({ context, input }) => {
-			const workspace = await withFlagsWrite(context, {
+			const workspace = await withWorkspace(context, {
 				websiteId: input.websiteId,
+				resource: "flag",
 				permissions: ["update"],
 			});
 
@@ -227,8 +167,9 @@ export const targetGroupsRouter = {
 
 			const group = existingGroup[0];
 
-			await withFlagsWrite(context, {
+			await withWorkspace(context, {
 				websiteId: group.websiteId,
+				resource: "flag",
 				permissions: ["update"],
 			});
 
@@ -274,8 +215,9 @@ export const targetGroupsRouter = {
 
 			const group = existingGroup[0];
 
-			await withFlagsWrite(context, {
+			await withWorkspace(context, {
 				websiteId: group.websiteId,
+				resource: "flag",
 				permissions: ["delete"],
 			});
 

@@ -5,6 +5,47 @@ import type { UseQueryOptions } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { useDynamicQuery } from "@/hooks/use-dynamic-query";
 
+export interface ProfileTransaction {
+	amount: number;
+	created: string;
+	currency: string;
+	product_name: string;
+	provider: string;
+	status: string;
+	transaction_id: string;
+	type: string;
+}
+
+export function useProfileRevenue(
+	websiteId: string,
+	userId: string,
+	dateRange: DateRange
+) {
+	const query = useDynamicQuery<{ profile_revenue: ProfileTransaction[] }>(
+		websiteId,
+		dateRange,
+		{
+			id: `user-revenue-${userId}`,
+			parameters: ["profile_revenue"],
+			filters: [
+				{
+					field: "anonymous_id",
+					operator: "eq",
+					value: userId,
+				},
+			],
+			limit: 50,
+		},
+		{
+			staleTime: 5 * 60 * 1000,
+			gcTime: 10 * 60 * 1000,
+			enabled: Boolean(userId && websiteId),
+		}
+	);
+
+	return { transactions: query.data.profile_revenue ?? [] };
+}
+
 function fallbackSessionId(
 	visitorId: string,
 	session: ProfileSession,
@@ -100,6 +141,7 @@ export function useUserProfile(
 
 		return {
 			visitor_id: rawProfile.visitor_id,
+			profile_id: rawProfile.profile_id || "",
 			first_visit: rawProfile.first_visit,
 			last_visit: rawProfile.last_visit,
 			total_sessions: rawProfile.total_sessions,

@@ -32,6 +32,7 @@ import {
 import { auth } from "@databuddy/auth";
 import { db, eq } from "@databuddy/db";
 import { agentChats } from "@databuddy/db/schema";
+import { config } from "@databuddy/env/app";
 import {
 	appendStreamChunk,
 	clearActiveStream,
@@ -63,28 +64,35 @@ import {
 	getMemoryContextCached,
 	shouldLoadMemoryContext,
 } from "@databuddy/ai/agents/cache";
-import { getAILogger } from "../lib/ai-logger";
-import { trackAgentEvent } from "../lib/databuddy";
+import { getAILogger } from "@databuddy/ai/lib/ai-logger";
+import { trackAgentEvent } from "@databuddy/ai/lib/databuddy";
 import { getResolvedAuth } from "../lib/auth-wide-event";
-import { captureError, mergeWideEvent } from "../lib/tracing";
-import { getAccessibleWebsites } from "../lib/accessible-websites";
+import { captureError, mergeWideEvent } from "@databuddy/ai/lib/tracing";
+import { getAccessibleWebsites } from "@databuddy/ai/lib/accessible-websites";
+import { warnAgentStreamRedisSideEffect } from "./agent-stream-errors";
+
+const PROTECTED_RESOURCE_METADATA_URL = `${config.urls.api}/.well-known/oauth-protected-resource`;
 
 function jsonError(status: number, code: string, message: string): Response {
+	const headers: Record<string, string> = {
+		"Content-Type": "application/json",
+	};
+	if (status === 401) {
+		headers["WWW-Authenticate"] =
+			`Bearer resource_metadata="${PROTECTED_RESOURCE_METADATA_URL}"`;
+	}
+
 	return new Response(
 		JSON.stringify({ success: false, error: message, code }),
 		{
 			status,
-			headers: { "Content-Type": "application/json" },
+			headers,
 		}
 	);
 }
 
-function getErrorMessage(error: unknown, fallback = "Unknown error"): string {
-	if (error instanceof Error) {
-		return error.message;
-	}
-	return fallback;
-}
+const INTERNAL_AGENT_ERROR_MESSAGE =
+	"Agent request failed. Please try again shortly.";
 
 function getErrorName(error: unknown, fallback = "UnknownError"): string {
 	if (error instanceof Error) {
@@ -508,6 +516,8 @@ export const agent = new Elysia({ prefix: "/v1/agent" })
 	.onBeforeHandle(({ isAuthenticated, set }) => {
 		if (!isAuthenticated) {
 			set.status = 401;
+			set.headers["WWW-Authenticate"] =
+				`Bearer resource_metadata="${PROTECTED_RESOURCE_METADATA_URL}"`;
 			return {
 				success: false,
 				error: "Authentication required",
@@ -521,20 +531,20 @@ export const agent = new Elysia({ prefix: "/v1/agent" })
 			const conversationId = body.id ?? generateId();
 			const userId = user?.id ?? null;
 			const organizationId = apiKey?.organizationId ?? null;
+			const principal = userId ?? (apiKey ? `apikey:${apiKey.id}` : null);
 
 			mergeWideEvent({
 				agent_chat_id: conversationId,
-				agent_user_id: userId ?? `apikey:${apiKey?.id ?? "unknown"}`,
+				...(principal ? { agent_user_id: principal } : {}),
 				...(organizationId ? { organization_id: organizationId } : {}),
 				source: "slack",
 			});
 
 			try {
-				if (!(user || apiKey)) {
+				if (!principal) {
 					return jsonError(401, "AUTH_REQUIRED", "Authentication required");
 				}
 
-				const principal = user?.id ?? `apikey:${apiKey?.id ?? "unknown"}`;
 				const rl = await ratelimit(`agent:ask:${principal}`, 30, 60);
 				if (!rl.success) {
 					return jsonError(
@@ -588,11 +598,11 @@ export const agent = new Elysia({ prefix: "/v1/agent" })
 					agent_error: true,
 					agent_type: AGENT_TYPE,
 					agent_chat_id: conversationId,
-					agent_user_id: userId ?? "unknown",
+					...(principal ? { agent_user_id: principal } : {}),
 					error_type: getErrorName(error),
 					source: "slack",
 				});
-				return jsonError(500, "INTERNAL_ERROR", getErrorMessage(error));
+				return jsonError(500, "INTERNAL_ERROR", INTERNAL_AGENT_ERROR_MESSAGE);
 			}
 		},
 		{ body: AgentAskRequestSchema, idleTimeout: 60_000 }
@@ -606,7 +616,7 @@ export const agent = new Elysia({ prefix: "/v1/agent" })
 				let organizationId: string | null = null;
 
 				mergeWideEvent({
-					agent_user_id: user?.id ?? "unknown",
+					...(user?.id ? { agent_user_id: user.id } : {}),
 					agent_chat_id: chatId,
 				});
 
@@ -626,7 +636,7 @@ export const agent = new Elysia({ prefix: "/v1/agent" })
 						return jsonError(
 							400,
 							"WORKSPACE_REQUIRED",
-							"No active workspace. Select an organization and try again."
+							"No active organization. Select an organization and try again."
 						);
 					}
 
@@ -671,7 +681,7 @@ export const agent = new Elysia({ prefix: "/v1/agent" })
 						return jsonError(
 							403,
 							"ACCESS_DENIED",
-							"No accessible websites in this workspace"
+							"No accessible websites in this organization"
 						);
 					}
 
@@ -822,7 +832,7 @@ export const agent = new Elysia({ prefix: "/v1/agent" })
 						return jsonError(
 							402,
 							"OUT_OF_CREDITS",
-							"You're out of Databunny credits this month. Upgrade or wait for the monthly reset."
+							"You've used your Databunny allowance for this month. Add more usage, upgrade, or wait for the monthly reset."
 						);
 					}
 
@@ -877,11 +887,7 @@ export const agent = new Elysia({ prefix: "/v1/agent" })
 					);
 
 					if (!validation.success) {
-						return jsonError(
-							400,
-							"INVALID_MESSAGES",
-							getErrorMessage(validation.error, "Invalid message format")
-						);
+						return jsonError(400, "INVALID_MESSAGES", "Invalid message format");
 					}
 
 					const modelMessages = await timeAgentPhase(
@@ -939,7 +945,7 @@ export const agent = new Elysia({ prefix: "/v1/agent" })
 								},
 								websiteId: defaultWebsiteId,
 								conversationId: chatId,
-								domain: defaultDomain ?? "unknown",
+								...(defaultDomain ? { domain: defaultDomain } : {}),
 							}
 						);
 					}
@@ -1051,7 +1057,16 @@ export const agent = new Elysia({ prefix: "/v1/agent" })
 						onFinish: async ({ messages }) => {
 							try {
 								await clearActiveStream(streamScope, chatId, streamId);
-							} catch {}
+							} catch (cleanupError) {
+								warnAgentStreamRedisSideEffect(
+									cleanupError,
+									"clear_active_stream",
+									{
+										chatId,
+										websiteId: defaultWebsiteId,
+									}
+								);
+							}
 							if (!persistedUserId) {
 								return;
 							}
@@ -1110,14 +1125,35 @@ export const agent = new Elysia({ prefix: "/v1/agent" })
 										break;
 									}
 									if (value && value.byteLength > 0) {
-										await appendStreamChunk(streamKey, value);
+										try {
+											await appendStreamChunk(streamKey, value);
+										} catch (persistError) {
+											warnAgentStreamRedisSideEffect(
+												persistError,
+												"append_stream_chunk",
+												{
+													chatId,
+													websiteId: defaultWebsiteId,
+												}
+											);
+											break;
+										}
 									}
 								}
 							} finally {
 								reader.releaseLock();
 								try {
 									await markStreamDone(streamKey);
-								} catch {}
+								} catch (cleanupError) {
+									warnAgentStreamRedisSideEffect(
+										cleanupError,
+										"mark_stream_done",
+										{
+											chatId,
+											websiteId: defaultWebsiteId,
+										}
+									);
+								}
 							}
 						})().catch((storageError) => {
 							captureError(storageError, {
@@ -1184,10 +1220,10 @@ export const agent = new Elysia({ prefix: "/v1/agent" })
 						agent_type: AGENT_TYPE,
 						agent_chat_id: chatId,
 						...(body.websiteId ? { agent_website_id: body.websiteId } : {}),
-						agent_user_id: user?.id ?? "unknown",
+						...(user?.id ? { agent_user_id: user.id } : {}),
 						error_type: getErrorName(error),
 					});
-					return jsonError(500, "INTERNAL_ERROR", getErrorMessage(error));
+					return jsonError(500, "INTERNAL_ERROR", INTERNAL_AGENT_ERROR_MESSAGE);
 				}
 			})();
 		},

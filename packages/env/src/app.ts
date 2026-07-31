@@ -21,7 +21,7 @@ const URLS = {
 	dashboard: {
 		cloud: "https://app.databuddy.cc",
 		local: "http://localhost:3000",
-		env: ["DASHBOARD_URL", "NEXT_PUBLIC_APP_URL", "APP_URL", "BETTER_AUTH_URL"],
+		env: ["DASHBOARD_URL", "NEXT_PUBLIC_APP_URL", "BETTER_AUTH_URL"],
 	},
 	status: {
 		cloud: "https://status.databuddy.cc",
@@ -55,6 +55,10 @@ export interface Config {
 	email: {
 		alertsFrom: string;
 		from: string;
+		resendApiKey?: string;
+	};
+	integrations: {
+		openAiAdsPixelId?: string;
 	};
 	urls: {
 		api: string;
@@ -70,10 +74,6 @@ function isProduction(env: Env): boolean {
 
 function defaultUrl(env: Env, setting: UrlConfig): string {
 	return isProduction(env) ? setting.cloud : setting.local;
-}
-
-function isLocalhost(url: URL): boolean {
-	return url.hostname === "localhost" || url.hostname === "127.0.0.1";
 }
 
 function readFirst(env: Env, keys: readonly string[]): string | undefined {
@@ -95,16 +95,15 @@ function readUrl(env: Env, setting: UrlConfig): string {
 		return fallback;
 	}
 
-	const normalized = normalizeUrl(value);
-	if (isProduction(env) && isLocalhost(new URL(normalized))) {
-		return fallback;
-	}
-
-	return normalized;
+	return normalizeUrl(value);
 }
 
 function readEmail(env: Env, setting: EmailConfig): string {
 	return readFirst(env, setting.env) ?? setting.default;
+}
+
+function readOptional(env: Env, key: string): string | undefined {
+	return env[key]?.trim() || undefined;
 }
 
 function readList(value: string | undefined): string[] {
@@ -134,6 +133,10 @@ export function createConfig(env: Env = process.env): Config {
 		email: {
 			alertsFrom: readEmail(env, EMAIL.alertsFrom),
 			from: readEmail(env, EMAIL.from),
+			resendApiKey: readOptional(env, "RESEND_API_KEY"),
+		},
+		integrations: {
+			openAiAdsPixelId: readOptional(env, "NEXT_PUBLIC_OPENAI_ADS_PIXEL_ID"),
 		},
 		urls: {
 			api: readUrl(env, URLS.api),

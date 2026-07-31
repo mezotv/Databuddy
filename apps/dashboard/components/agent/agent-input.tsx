@@ -3,6 +3,8 @@
 import { useAtom, useAtomValue, useSetAtom } from "jotai";
 import { useCallback, useEffect, memo, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
+import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 import {
 	BrainIcon,
 	CaretDownIcon,
@@ -48,11 +50,13 @@ import {
 	AgentTextSwitch,
 	AGENT_INPUT_PLACEHOLDER_PHRASES,
 } from "./agent-text-switch";
+import { AgentVoiceDialog } from "./agent-voice-dialog";
 import { useEnterSubmit } from "./hooks/use-enter-submit";
 import { DropdownMenu } from "@databuddy/ui/client";
 import { Button, Skeleton, Textarea, Tooltip } from "@databuddy/ui";
 
 export function AgentInput() {
+	const router = useRouter();
 	const { sendMessage, setMessages, stop, status } = useChat();
 	const { messages: pendingMessages, removeAction } = usePendingQueue();
 	const isLoading = status === "streaming" || status === "submitted";
@@ -153,6 +157,15 @@ export function AgentInput() {
 			balance <= 0
 		) {
 			bumpCreditShake((n) => n + 1);
+			toast.error("Databunny can't answer another question yet", {
+				description:
+					"This organization's investigation credit balance is empty. Add credits or change the plan to continue.",
+				id: "databunny-usage-empty",
+				action: {
+					label: "View billing",
+					onClick: () => router.push("/billing#topup"),
+				},
+			});
 			return;
 		}
 		sendMessage({ text: input.trim() });
@@ -166,6 +179,10 @@ export function AgentInput() {
 			setMessages([]);
 			setInput("");
 			setCommandsDismissed(true);
+			toast.info("Messages cleared from this view", {
+				description:
+					"The saved conversation remains available in chat history.",
+			});
 			return;
 		}
 		setInput(command.prompt);
@@ -197,6 +214,19 @@ export function AgentInput() {
 	const removeMention = (id: string) => {
 		setMentions((prev) => prev.filter((m) => m.id !== id));
 	};
+
+	const applyVoiceTranscript = useCallback(
+		(transcript: string) => {
+			setInput((prev) => {
+				const existing = prev.trim();
+				return existing ? `${existing} ${transcript}` : transcript;
+			});
+			setCommandsDismissed(false);
+			setMentionsDismissed(false);
+			requestAnimationFrame(() => textareaRef.current?.focus());
+		},
+		[setInput]
+	);
 
 	const handleMessageKeyDown = (
 		event: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>
@@ -326,6 +356,7 @@ export function AgentInput() {
 				canSend={Boolean(input.trim())}
 				isLoading={isLoading}
 				onStop={stop}
+				onVoiceTranscript={applyVoiceTranscript}
 			/>
 		</div>
 	);
@@ -369,10 +400,12 @@ const InputToolbar = memo(function InputToolbar({
 	canSend,
 	isLoading,
 	onStop,
+	onVoiceTranscript,
 }: {
 	canSend: boolean;
 	isLoading: boolean;
 	onStop: () => void;
+	onVoiceTranscript: (transcript: string) => void;
 }) {
 	return (
 		<div className="flex items-center justify-between gap-3 rounded border-border/60 bg-background px-1.5 py-1.5">
@@ -395,6 +428,9 @@ const InputToolbar = memo(function InputToolbar({
 
 			<div className="ml-auto flex shrink-0 items-center gap-3">
 				<KeyboardHints isLoading={isLoading} />
+				{isLoading ? null : (
+					<AgentVoiceDialog onTranscript={onVoiceTranscript} />
+				)}
 				{isLoading ? (
 					<Button
 						aria-label="Stop generation"

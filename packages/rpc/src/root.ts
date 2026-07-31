@@ -15,7 +15,7 @@ import { integrationsRouter } from "./routers/integrations";
 import { linkFoldersRouter } from "./routers/link-folders";
 import { linksRouter } from "./routers/links";
 import { organizationsRouter } from "./routers/organizations";
-import { preferencesRouter } from "./routers/preferences";
+import { profilesRouter } from "./routers/profiles";
 import { revenueRouter } from "./routers/revenue";
 import { statusPageRouter } from "./routers/status-page";
 import { targetGroupsRouter } from "./routers/target-groups";
@@ -30,7 +30,6 @@ export const appRouter = {
 	annotations: annotationsRouter,
 	websites: websitesRouter,
 	funnels: funnelsRouter,
-	preferences: preferencesRouter,
 	goals: goalsRouter,
 	autocomplete: autocompleteRouter,
 	apikeys: apikeysRouter,
@@ -41,6 +40,7 @@ export const appRouter = {
 	insights: insightsRouter,
 	targetGroups: targetGroupsRouter,
 	organizations: organizationsRouter,
+	profiles: profilesRouter,
 	billing: billingRouter,
 	statusPage: statusPageRouter,
 	uptime: uptimeRouter,

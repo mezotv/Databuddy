@@ -17,14 +17,16 @@ import { UAParser } from "ua-parser-js";
 import { captureError, mergeWideEvent, record } from "../lib/logging";
 import { sendLinkVisit } from "../lib/producer";
 import { extractIp, getGeo } from "../utils/geo";
-import { appendRef } from "../utils/url";
 
 const EXPIRED_URL = `${config.urls.dashboard}/dby/expired`;
 const NOT_FOUND_URL = `${config.urls.dashboard}/dby/not-found`;
 const OG_PROXY_URL = `${config.urls.dashboard}/dby/l`;
 
-const NULL_SENTINEL = Object.freeze({ __null: true }) as unknown as CachedLink;
-const linkCache = new LRUCache<string, CachedLink>({ max: 1000, ttl: 5000 });
+const NULL_SENTINEL = Symbol("null");
+const linkCache = new LRUCache<string, CachedLink | typeof NULL_SENTINEL>({
+	max: 1000,
+	ttl: 5000,
+});
 const etagCache = new LRUCache<string, string>({ max: 1000, ttl: 60_000 });
 const dedupCache = new LRUCache<string, true>({ max: 10_000, ttl: 300_000 });
 const botCache = new LRUCache<string, { isBot: boolean; isSocial: boolean }>({
@@ -343,9 +345,13 @@ export const redirectRoute = new Elysia().get(
 		const t0 = performance.now();
 		const { slug } = params;
 
-		if (IGNORED_SLUGS.has(slug) || !SLUG_RE.test(slug)) {
+		if (IGNORED_SLUGS.has(slug)) {
 			set.status = 404;
 			return;
+		}
+		if (!SLUG_RE.test(slug)) {
+			set.headers = { "Cache-Control": "private, no-store" };
+			return redirect(NOT_FOUND_URL, 302);
 		}
 		const ip = extractIp(request);
 		const ipHash = hashIp(ip);
@@ -410,8 +416,7 @@ export const redirectRoute = new Elysia().get(
 			}
 		}
 
-		const attributedUrl = appendRef(targetUrl, link.id);
-		const etag = generateETag(link, attributedUrl);
+		const etag = generateETag(link, targetUrl);
 
 		if (request.headers.get("if-none-match") === etag) {
 			emit("not_modified");
@@ -430,7 +435,7 @@ export const redirectRoute = new Elysia().get(
 			"Cache-Control": "private, no-cache",
 			ETag: etag,
 		};
-		return redirect(attributedUrl, 302);
+		return redirect(targetUrl, 302);
 	},
 	{ params: t.Object({ slug: t.String() }) }
 );

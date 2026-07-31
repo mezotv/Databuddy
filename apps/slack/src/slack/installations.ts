@@ -7,6 +7,7 @@ import {
 	cacheable,
 	invalidateSlackChannelBindingCache,
 } from "@databuddy/redis";
+import { createInternalPrincipal } from "@databuddy/rpc";
 import type { Authorize } from "@slack/bolt";
 import { randomUUIDv7 } from "bun";
 import type {
@@ -24,17 +25,14 @@ const SLACK_AGENT_SCOPES = [
 	"write:links",
 	"manage:websites",
 	"manage:flags",
+	"manage:config",
 ] as const;
 const SLACK_AGENT_RESOURCES = { global: [...SLACK_AGENT_SCOPES] };
 
 function buildSlackApiKey(installation: ActiveSlackIntegration): ApiKeyRow {
-	return {
+	const principal = createInternalPrincipal({
 		createdAt: installation.createdAt,
-		enabled: true,
-		expiresAt: null,
 		id: `slack:${installation.id}`,
-		keyHash: `slack:${installation.id}`,
-		lastUsedAt: null,
 		metadata: {
 			description: "Slack integration agent identity.",
 			resources: SLACK_AGENT_RESOURCES,
@@ -44,15 +42,15 @@ function buildSlackApiKey(installation: ActiveSlackIntegration): ApiKeyRow {
 		organizationId: installation.organizationId,
 		prefix: "slack",
 		rateLimitEnabled: true,
-		rateLimitMax: null,
-		rateLimitTimeWindow: null,
-		revokedAt: null,
 		scopes: [...SLACK_AGENT_SCOPES],
 		start: installation.id.slice(0, 8),
-		type: "automation",
 		updatedAt: installation.updatedAt,
 		userId: installation.installedByUserId,
-	};
+	});
+	if (!principal.apiKey) {
+		throw new Error("createInternalPrincipal returned no apiKey");
+	}
+	return principal.apiKey;
 }
 
 export interface SlackChannelBindingCommand {
@@ -61,7 +59,6 @@ export interface SlackChannelBindingCommand {
 }
 
 export interface SlackChannelBindingCommandResult {
-	autoBound?: boolean;
 	message: string;
 	ok: boolean;
 }
@@ -73,7 +70,7 @@ export interface SlackTeamContext {
 
 export type SlackInstallationServices = Pick<
 	SlackInstallationStore,
-	"bindChannel" | "getChannelReadiness" | "getTeamContext"
+	"bindChannel" | "getChannelReadiness" | "getTeamContext" | "resolve"
 >;
 
 export class SlackInstallationStore implements SlackRunContextResolver {
@@ -208,7 +205,6 @@ export class SlackInstallationStore implements SlackRunContextResolver {
 					slack_team_id: teamId,
 				}).emit();
 				return {
-					autoBound: true,
 					message: SLACK_COPY.autoBindSuccess,
 					ok: true,
 				};
@@ -229,7 +225,6 @@ export class SlackInstallationStore implements SlackRunContextResolver {
 		return {
 			apiKey: buildSlackApiKey(installation),
 			organizationId: installation.organizationId,
-			teamId: installation.teamId,
 		};
 	}
 }

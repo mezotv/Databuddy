@@ -8,6 +8,7 @@ import {
 	revenueConfig,
 } from "./analytics";
 import { apikey } from "./api-keys";
+import { auditEvents } from "./audit";
 import {
 	account,
 	invitation,
@@ -20,14 +21,20 @@ import {
 	user,
 	userPreferences,
 } from "./auth";
-import { alarmDestinations, alarms, usageAlertLog } from "./billing";
+import {
+	alarmDestinations,
+	alarms,
+	autumnWebhookEvents,
+	usageAlertLog,
+} from "./billing";
 import { feedback, feedbackRedemptions, insightUserFeedback } from "./feedback";
 import { flags, flagsToTargetGroups, targetGroups } from "./flags";
 import { slackChannelBindings, slackIntegrations } from "./integrations";
 import {
 	insightGenerationConfigs,
+	insightObservations,
+	insightRunEffects,
 	insightRunItems,
-	insightRollups,
 	insightRuns,
 } from "./insights";
 import { linkFolders, links } from "./links";
@@ -55,6 +62,7 @@ const schema = {
 	analyticsInsights,
 	funnelDefinitions,
 	apikey,
+	auditEvents,
 	flags,
 	targetGroups,
 	flagsToTargetGroups,
@@ -69,6 +77,7 @@ const schema = {
 	revenueConfig,
 	alarms,
 	alarmDestinations,
+	autumnWebhookEvents,
 	usageAlertLog,
 	goals,
 	annotations,
@@ -78,7 +87,8 @@ const schema = {
 	insightGenerationConfigs,
 	insightRuns,
 	insightRunItems,
-	insightRollups,
+	insightRunEffects,
+	insightObservations,
 	ssoProvider,
 	agentChats,
 	slackIntegrations,
@@ -121,9 +131,12 @@ export const relations = defineRelations(schema, (r) => ({
 		linkFolders: r.many.linkFolders(),
 		links: r.many.links(),
 		slackIntegrations: r.many.slackIntegrations(),
-		insightGenerationConfigs: r.many.insightGenerationConfigs(),
+		insightGenerationConfig: r.one.insightGenerationConfigs({
+			from: r.organization.id,
+			to: r.insightGenerationConfigs.organizationId,
+		}),
 		insightRuns: r.many.insightRuns(),
-		insightRollups: r.many.insightRollups(),
+		insightObservations: r.many.insightObservations(),
 	},
 
 	account: {
@@ -193,8 +206,8 @@ export const relations = defineRelations(schema, (r) => ({
 		funnelDefinitions: r.many.funnelDefinitions(),
 		alarms: r.many.alarms(),
 		analyticsInsights: r.many.analyticsInsights(),
-		insightGenerationConfigs: r.many.insightGenerationConfigs(),
 		insightRunItems: r.many.insightRunItems(),
+		insightObservations: r.many.insightObservations(),
 	},
 
 	analyticsInsights: {
@@ -216,10 +229,6 @@ export const relations = defineRelations(schema, (r) => ({
 			to: r.organization.id,
 			optional: false,
 		}),
-		website: r.one.websites({
-			from: r.insightGenerationConfigs.websiteId,
-			to: r.websites.id,
-		}),
 	},
 
 	insightRuns: {
@@ -233,7 +242,7 @@ export const relations = defineRelations(schema, (r) => ({
 			to: r.user.id,
 		}),
 		items: r.many.insightRunItems(),
-		rollups: r.many.insightRollups(),
+		observations: r.many.insightObservations(),
 	},
 
 	insightRunItems: {
@@ -252,17 +261,31 @@ export const relations = defineRelations(schema, (r) => ({
 			to: r.websites.id,
 			optional: false,
 		}),
+		effects: r.many.insightRunEffects(),
 	},
 
-	insightRollups: {
+	insightRunEffects: {
+		item: r.one.insightRunItems({
+			from: r.insightRunEffects.runItemId,
+			to: r.insightRunItems.id,
+			optional: false,
+		}),
+	},
+
+	insightObservations: {
+		run: r.one.insightRuns({
+			from: r.insightObservations.runId,
+			to: r.insightRuns.id,
+		}),
 		organization: r.one.organization({
-			from: r.insightRollups.organizationId,
+			from: r.insightObservations.organizationId,
 			to: r.organization.id,
 			optional: false,
 		}),
-		run: r.one.insightRuns({
-			from: r.insightRollups.runId,
-			to: r.insightRuns.id,
+		website: r.one.websites({
+			from: r.insightObservations.websiteId,
+			to: r.websites.id,
+			optional: false,
 		}),
 	},
 
@@ -519,6 +542,10 @@ export const relations = defineRelations(schema, (r) => ({
 			from: r.feedback.reviewedBy,
 			to: r.user.id,
 			alias: "feedbackReviewer",
+		}),
+		website: r.one.websites({
+			from: r.feedback.websiteId,
+			to: r.websites.id,
 		}),
 	},
 

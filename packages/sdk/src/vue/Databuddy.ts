@@ -10,6 +10,11 @@ import {
 } from "vue";
 
 const optionalBoolean = { type: Boolean, default: undefined } as const;
+const optionalBooleanOrAuto = {
+	type: [Boolean, String] as PropType<boolean | "auto">,
+	default: undefined,
+	validator: (value: unknown) => typeof value === "boolean" || value === "auto",
+} as const;
 
 export const Databuddy = defineComponent({
 	props: {
@@ -17,13 +22,13 @@ export const Databuddy = defineComponent({
 		batchSize: Number,
 		batchTimeout: Number,
 		clientId: String,
-		clientSecret: String,
 		debug: optionalBoolean,
 		disabled: optionalBoolean,
 		enableBatching: optionalBoolean,
 		enableRetries: optionalBoolean,
 		filter: Function as PropType<(event: unknown) => boolean>,
 		ignoreBotDetection: optionalBoolean,
+		anonymizeVisitorIds: optionalBooleanOrAuto,
 		initialRetryDelay: Number,
 		maskPatterns: Array as PropType<string[]>,
 		maxRetries: Number,

@@ -1,4 +1,8 @@
-import { isNotNull } from "drizzle-orm";
+import type {
+	InsightSentiment,
+	InsightSeverity,
+} from "@databuddy/shared/insights";
+import { isNotNull, sql } from "drizzle-orm";
 import {
 	boolean,
 	doublePrecision,
@@ -13,6 +17,7 @@ import {
 	uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { organization, user } from "./auth";
+
 import { websites } from "./websites";
 
 export const funnelStepType = pgEnum("FunnelStepType", [
@@ -31,7 +36,15 @@ export const chartType = pgEnum("chart_type", ["metrics"]);
 
 export interface DataFilter {
 	field: string;
-	operator: "equals" | "contains" | "not_equals" | "in" | "not_in";
+	operator:
+		| "contains"
+		| "ends_with"
+		| "equals"
+		| "in"
+		| "not_contains"
+		| "not_equals"
+		| "not_in"
+		| "starts_with";
 	value: string | string[];
 }
 
@@ -55,34 +68,6 @@ export interface AnnotationChartContext {
 	}>;
 	metrics?: string[];
 	tabId?: string;
-}
-
-export interface AnalyticsInsightMetric {
-	current: number;
-	format: "number" | "percent" | "duration_ms" | "duration_s";
-	label: string;
-	previous?: number;
-}
-
-export interface AnalyticsInsightEvidence {
-	description: string;
-	type: "segment" | "error" | "annotation" | "temporal" | "metric";
-}
-
-export type AnalyticsInsightSource = "web" | "product" | "ops" | "business";
-
-export interface AnalyticsInsightAction {
-	label: string;
-	params: Record<string, string>;
-	type:
-		| "fix_goal"
-		| "create_funnel"
-		| "add_custom_event"
-		| "create_annotation"
-		| "update_config"
-		| "add_tracking"
-		| "investigate_further"
-		| "code_fix";
 }
 
 export const funnelDefinitions = pgTable(
@@ -216,32 +201,14 @@ export const analyticsInsights = pgTable(
 		id: text().primaryKey(),
 		organizationId: text("organization_id").notNull(),
 		websiteId: text("website_id").notNull(),
-		runId: text("run_id").notNull(),
 		title: text().notNull(),
 		description: text().notNull(),
-		suggestion: text().notNull(),
-		severity: text().notNull(),
-		sentiment: text().notNull(),
-		type: text().notNull(),
-		priority: integer().notNull(),
+		severity: text().$type<InsightSeverity>().notNull(),
+		sentiment: text().$type<InsightSentiment>().notNull(),
 		changePercent: doublePrecision("change_percent"),
 		dedupeKey: text("dedupe_key"),
 		subjectKey: text("subject_key").notNull().default(""),
-		sources: jsonb().$type<AnalyticsInsightSource[]>().notNull().default([]),
-		confidence: doublePrecision().notNull().default(0),
-		impactSummary: text("impact_summary"),
-		metrics: jsonb().$type<AnalyticsInsightMetric[]>(),
-		rootCause: text("root_cause"),
-		evidence: jsonb("evidence").$type<AnalyticsInsightEvidence[]>(),
-		investigationDepth: text("investigation_depth").$type<
-			"surface" | "investigated" | "deep"
-		>(),
-		actions: jsonb().$type<AnalyticsInsightAction[]>(),
 		timezone: text().notNull().default("UTC"),
-		currentPeriodFrom: text("current_period_from").notNull(),
-		currentPeriodTo: text("current_period_to").notNull(),
-		previousPeriodFrom: text("previous_period_from").notNull(),
-		previousPeriodTo: text("previous_period_to").notNull(),
 		status: text().$type<"open" | "resolved">().notNull().default("open"),
 		resolvedAt: timestamp("resolved_at", {
 			precision: 3,
@@ -266,11 +233,19 @@ export const analyticsInsights = pgTable(
 			table.websiteId,
 			table.createdAt.desc()
 		),
-		index("analytics_insights_run_idx").on(table.runId),
 		index("analytics_insights_subject_key_idx").on(
 			table.websiteId,
 			table.subjectKey,
 			table.createdAt.desc()
+		),
+		index("analytics_insights_org_resolved_sort_idx").on(
+			table.organizationId,
+			sql`coalesce(${table.resolvedAt}, ${table.createdAt}) desc`
+		),
+		index("analytics_insights_website_resolved_sort_idx").on(
+			table.organizationId,
+			table.websiteId,
+			sql`coalesce(${table.resolvedAt}, ${table.createdAt}) desc`
 		),
 		uniqueIndex("analytics_insights_org_dedupe_key_uidx")
 			.on(table.organizationId, table.dedupeKey)

@@ -1,10 +1,9 @@
 import { db } from "@databuddy/db";
 import { chQuery } from "@databuddy/db/clickhouse";
 import { cacheable } from "@databuddy/redis";
+import { auditActions } from "@databuddy/shared/audit";
 import {
-	ACTIONABLE_TRACKING_BLOCK_REASONS,
 	getTrackingBlockOriginHost,
-	isActionableTrackingBlockReason,
 	isIgnoredTrackingBlockOrigin,
 	matchesTrackingBlockAllowedOrigin,
 	matchesTrackingBlockIgnoredOrigin,
@@ -27,15 +26,24 @@ import {
 } from "@databuddy/validation";
 import { z } from "zod";
 import { rpcError } from "../errors";
-import { logger, record } from "../lib/logger";
+import { logger } from "../lib/logger";
+import { appendRpcAuditEvent } from "../lib/audit";
 import { protectedProcedure, publicProcedure, trackedProcedure } from "../orpc";
 import { setTrackProperties } from "../middleware/track-mutation";
-import { withWorkspace } from "../procedures/with-workspace";
+import { authorizeTransfer } from "../procedures/with-resource";
+import {
+	withPublicWorkspace,
+	withWorkspace,
+} from "../procedures/with-workspace";
 import {
 	generateExport,
 	validateExportDateRange,
 } from "../services/export-service";
 import { mergeWebsiteSecuritySettings } from "./website-settings";
+import {
+	CLICKHOUSE_TRACKING_HEALTH_TIMEOUT_MESSAGE,
+	getTrackingHealthErrorLogLevel,
+} from "./tracking-health-errors";
 import {
 	type ChartDataRow,
 	type ProcessedMiniChartData,
@@ -59,9 +67,12 @@ function handleServiceError(error: unknown): never {
 
 const TRACKING_HEALTH_WINDOW_HOURS = 24;
 const TRACKING_ISSUE_MIN_BLOCKS = 3;
-const TRACKING_ISSUE_TYPES = ACTIONABLE_TRACKING_BLOCK_REASONS;
+const TRACKING_ISSUE_TYPES = [
+	"origin_not_authorized",
+	"ip_not_authorized",
+] as const satisfies readonly ActionableTrackingBlockReason[];
 
-type TrackingIssueType = ActionableTrackingBlockReason;
+type TrackingIssueType = (typeof TRACKING_ISSUE_TYPES)[number];
 type TrackingIssueSeverity = "critical" | "warning";
 
 interface EventsCheckResult {
@@ -94,7 +105,7 @@ function buildTrackingIssue(
 	websiteDomain: string | null,
 	recentEvents: number
 ): TrackingIssue | null {
-	if (!isActionableTrackingBlockReason(row.issueType)) {
+	if (!isDashboardTrackingIssueType(row.issueType)) {
 		return null;
 	}
 
@@ -123,21 +134,6 @@ function buildTrackingIssue(
 		};
 	}
 
-	if (row.issueType === "origin_missing") {
-		return {
-			count: row.count,
-			expectedDomain,
-			fix: "Browser requests must include an allowed Origin. For server-side events, use the /track API with an API key instead of the browser ingest endpoint.",
-			lastSeen: row.lastSeen,
-			message:
-				"Recent tracking requests are missing an Origin header and are blocked by the website origin allowlist.",
-			origin: null,
-			originHost: null,
-			severity,
-			type: row.issueType,
-		};
-	}
-
 	return {
 		count: row.count,
 		expectedDomain,
@@ -150,6 +146,12 @@ function buildTrackingIssue(
 		severity,
 		type: row.issueType,
 	};
+}
+
+function isDashboardTrackingIssueType(
+	issueType: string
+): issueType is TrackingIssueType {
+	return (TRACKING_ISSUE_TYPES as readonly string[]).includes(issueType);
 }
 
 async function getTrackingEventsStatus(
@@ -166,7 +168,10 @@ async function getTrackingEventsStatus(
 				{ websiteId }
 			),
 			new Promise<never>((_, reject) =>
-				setTimeout(() => reject(new Error("ClickHouse query timeout")), 10_000)
+				setTimeout(
+					() => reject(new Error(CLICKHOUSE_TRACKING_HEALTH_TIMEOUT_MESSAGE)),
+					10_000
+				)
 			),
 		]);
 
@@ -179,7 +184,8 @@ async function getTrackingEventsStatus(
 	} catch (error) {
 		const message =
 			error instanceof Error ? error.message : "Unknown error checking events";
-		logger.error({ websiteId }, `Error checking tracking events: ${message}`);
+		const level = getTrackingHealthErrorLogLevel(error);
+		logger[level]({ websiteId }, `Error checking tracking events: ${message}`);
 		return { hasEvents: false, recentEvents: 0, error: message };
 	}
 }
@@ -241,7 +247,10 @@ async function getRecentBlockedTrackingIssue(
 				}
 			),
 			new Promise<never>((_, reject) =>
-				setTimeout(() => reject(new Error("ClickHouse query timeout")), 10_000)
+				setTimeout(
+					() => reject(new Error(CLICKHOUSE_TRACKING_HEALTH_TIMEOUT_MESSAGE)),
+					10_000
+				)
 			),
 		]);
 
@@ -254,7 +263,8 @@ async function getRecentBlockedTrackingIssue(
 			error instanceof Error
 				? error.message
 				: "Unknown error checking blocked traffic";
-		logger.error({ websiteId }, `Error checking blocked traffic: ${message}`);
+		const level = getTrackingHealthErrorLogLevel(error);
+		logger[level]({ websiteId }, `Error checking blocked traffic: ${message}`);
 		return null;
 	}
 }
@@ -474,7 +484,7 @@ const fetchChartData = cacheable(_fetchChartData, {
 export const websitesRouter = {
 	list: protectedProcedure
 		.route({
-			description: "Returns websites for the active workspace.",
+			description: "Returns websites for the active organization.",
 			method: "POST",
 			path: "/websites/list",
 			summary: "List websites",
@@ -507,31 +517,23 @@ export const websitesRouter = {
 		.input(z.object({ organizationId: z.string().optional() }).default({}))
 		.output(listWithChartsOutputSchema)
 		.handler(async ({ context, input }) => {
-			const workspace = await record("withWorkspace", () =>
-				withWorkspace(context, {
-					organizationId: input.organizationId,
-					resource: "website",
-					permissions: ["read"],
-				})
-			);
+			const workspace = await withWorkspace(context, {
+				organizationId: input.organizationId,
+				resource: "website",
+				permissions: ["read"],
+			});
 
 			if (!workspace.organizationId) {
 				throw rpcError.badRequest("Organization ID is required");
 			}
 
-			const websitesList = await record("websiteService.list", () =>
-				websiteService.list(workspace.organizationId)
-			);
+			const websitesList = await websiteService.list(workspace.organizationId);
 
 			const websiteIds = websitesList.map((site) => site.id);
-			const [chartData, activeUsers] = await record(
-				"fetchChartsAndActiveUsers",
-				() =>
-					Promise.all([
-						fetchChartData(websiteIds),
-						fetchActiveUsers(websiteIds),
-					])
-			);
+			const [chartData, activeUsers] = await Promise.all([
+				fetchChartData(websiteIds),
+				fetchActiveUsers(websiteIds),
+			]);
 
 			return { websites: websitesList, chartData, activeUsers };
 		}),
@@ -571,10 +573,9 @@ export const websitesRouter = {
 		.input(z.object({ id: z.string() }))
 		.output(publicWebsiteSummarySchema)
 		.handler(async ({ context, input }) => {
-			const workspace = await withWorkspace(context, {
+			const workspace = await withPublicWorkspace(context, {
 				websiteId: input.id,
 				permissions: ["read"],
-				allowPublicAccess: true,
 			});
 
 			const site = workspace.website;
@@ -594,7 +595,8 @@ export const websitesRouter = {
 
 	create: trackedProcedure
 		.route({
-			description: "Creates a website. Requires workspace create permission.",
+			description:
+				"Creates a website. Requires organization create permission.",
 			method: "POST",
 			path: "/websites/create",
 			summary: "Create website",
@@ -610,12 +612,34 @@ export const websitesRouter = {
 			});
 
 			try {
-				return await websiteService.create({
-					name: input.name,
-					domain: input.domain,
-					organizationId: workspace.organizationId,
-					status: "ACTIVE" as const,
+				const created = await context.db.transaction(async (tx) => {
+					const created = await websiteService.createInTransaction(tx, {
+						name: input.name,
+						domain: input.domain,
+						organizationId: workspace.organizationId,
+						status: "ACTIVE",
+					});
+					await appendRpcAuditEvent(
+						context,
+						workspace.organizationId,
+						{
+							action: auditActions.WEBSITE_CREATED,
+							operation: "websites.create",
+							target: {
+								id: created.id,
+								displayName: created.name ?? created.domain,
+							},
+							changes: {
+								domain: { after: created.domain },
+								name: { after: created.name },
+							},
+						},
+						tx
+					);
+					return created;
 				});
+				await websiteService.invalidateCachesAfterMutation({ after: created });
+				return created;
 			} catch (error) {
 				handleServiceError(error);
 			}
@@ -632,10 +656,11 @@ export const websitesRouter = {
 		.input(updateWebsiteSchema)
 		.output(websiteOutputSchema)
 		.handler(async ({ context, input }) => {
-			const { website: websiteToUpdate } = await withWorkspace(context, {
+			const workspace = await withWorkspace(context, {
 				websiteId: input.id,
 				permissions: ["update"],
 			});
+			const websiteToUpdate = workspace.website;
 
 			const serviceInput: { name?: string; domain?: string } = {};
 			if (input.name !== undefined) {
@@ -647,10 +672,45 @@ export const websitesRouter = {
 
 			let updatedWebsite: Website;
 			try {
-				updatedWebsite = await websiteService.updateById(
-					input.id,
-					serviceInput
-				);
+				updatedWebsite = await context.db.transaction(async (tx) => {
+					const updated = await websiteService.updateInTransaction(
+						tx,
+						input.id,
+						serviceInput
+					);
+					await appendRpcAuditEvent(
+						context,
+						workspace.organizationId,
+						{
+							action: auditActions.WEBSITE_UPDATED,
+							operation: "websites.update",
+							target: {
+								id: updated.id,
+								displayName: updated.name ?? updated.domain,
+							},
+							changes: {
+								...(input.name !== undefined && {
+									name: {
+										before: websiteToUpdate.name,
+										after: updated.name,
+									},
+								}),
+								...(input.domain !== undefined && {
+									domain: {
+										before: websiteToUpdate.domain,
+										after: updated.domain,
+									},
+								}),
+							},
+						},
+						tx
+					);
+					return updated;
+				});
+				await websiteService.invalidateCachesAfterMutation({
+					before: websiteToUpdate,
+					after: updatedWebsite,
+				});
 			} catch (error) {
 				handleServiceError(error);
 			}
@@ -688,15 +748,46 @@ export const websitesRouter = {
 		.output(websiteOutputSchema)
 		.handler(async ({ context, input }) => {
 			setTrackProperties({ is_public: input.isPublic });
-			const { website } = await withWorkspace(context, {
+			const workspace = await withWorkspace(context, {
 				websiteId: input.id,
 				permissions: ["update"],
 			});
+			const { website } = workspace;
 
 			let updatedWebsite: Website;
 			try {
-				updatedWebsite = await websiteService.updateById(input.id, {
-					isPublic: input.isPublic,
+				updatedWebsite = await context.db.transaction(async (tx) => {
+					const updated = await websiteService.updateInTransaction(
+						tx,
+						input.id,
+						{
+							isPublic: input.isPublic,
+						}
+					);
+					await appendRpcAuditEvent(
+						context,
+						workspace.organizationId,
+						{
+							action: auditActions.WEBSITE_VISIBILITY_CHANGED,
+							operation: "websites.togglePublic",
+							target: {
+								id: updated.id,
+								displayName: updated.name ?? updated.domain,
+							},
+							changes: {
+								isPublic: {
+									before: website.isPublic,
+									after: updated.isPublic,
+								},
+							},
+						},
+						tx
+					);
+					return updated;
+				});
+				await websiteService.invalidateCachesAfterMutation({
+					before: website,
+					after: updatedWebsite,
 				});
 			} catch (error) {
 				handleServiceError(error);
@@ -726,13 +817,37 @@ export const websitesRouter = {
 		.input(z.object({ id: z.string() }))
 		.output(successOutputSchema)
 		.handler(async ({ context, input }) => {
-			const { website: websiteToDelete } = await withWorkspace(context, {
+			const workspace = await withWorkspace(context, {
 				websiteId: input.id,
 				permissions: ["delete"],
 			});
+			const websiteToDelete = workspace.website;
 
 			try {
-				await websiteService.deleteById(input.id);
+				const deleted = await context.db.transaction(async (tx) => {
+					const deleted = await websiteService.deleteInTransaction(
+						tx,
+						input.id
+					);
+					await appendRpcAuditEvent(
+						context,
+						workspace.organizationId,
+						{
+							action: auditActions.WEBSITE_DELETED,
+							operation: "websites.delete",
+							target: {
+								id: deleted.id,
+								displayName: deleted.name ?? deleted.domain,
+							},
+							changes: { deleted: { after: true } },
+						},
+						tx
+					);
+					return deleted;
+				});
+				await websiteService.invalidateCachesAfterMutation({
+					before: deleted,
+				});
 			} catch (error) {
 				handleServiceError(error);
 			}
@@ -753,7 +868,7 @@ export const websitesRouter = {
 
 	transfer: trackedProcedure
 		.route({
-			description: "Transfers website to another workspace.",
+			description: "Transfers a website to another organization.",
 			method: "POST",
 			path: "/websites/transfer",
 			summary: "Transfer website",
@@ -762,25 +877,75 @@ export const websitesRouter = {
 		.input(transferWebsiteSchema)
 		.output(websiteOutputSchema)
 		.handler(async ({ context, input }) => {
-			await withWorkspace(context, {
-				websiteId: input.websiteId,
-				permissions: ["update"],
-			});
-
 			if (!input.organizationId) {
-				throw rpcError.badRequest("Website must be transferred to a workspace");
+				throw rpcError.badRequest(
+					"Website must be transferred to an organization"
+				);
 			}
+			const targetOrganizationId = input.organizationId;
 
-			await withWorkspace(context, {
-				organizationId: input.organizationId,
+			const website = await authorizeTransfer(context, {
 				resource: "website",
-				permissions: ["create"],
+				id: input.websiteId,
+				targetOrganizationId,
 			});
 
 			try {
-				return await websiteService.updateById(input.websiteId, {
-					organizationId: input.organizationId,
+				const updated = await context.db.transaction(async (tx) => {
+					const updated = await websiteService.updateInTransaction(
+						tx,
+						input.websiteId,
+						{ organizationId: targetOrganizationId }
+					);
+					await Promise.all([
+						appendRpcAuditEvent(
+							context,
+							website.organizationId,
+							{
+								action: auditActions.WEBSITE_TRANSFERRED,
+								operation: "websites.transfer",
+								target: {
+									id: updated.id,
+									displayName: updated.name ?? updated.domain,
+								},
+								changes: {
+									organizationId: {
+										before: website.organizationId,
+										after: targetOrganizationId,
+									},
+								},
+								metadata: { transferDirection: "outbound" },
+							},
+							tx
+						),
+						appendRpcAuditEvent(
+							context,
+							targetOrganizationId,
+							{
+								action: auditActions.WEBSITE_TRANSFERRED,
+								operation: "websites.transfer",
+								target: {
+									id: updated.id,
+									displayName: updated.name ?? updated.domain,
+								},
+								changes: {
+									organizationId: {
+										before: website.organizationId,
+										after: targetOrganizationId,
+									},
+								},
+								metadata: { transferDirection: "inbound" },
+							},
+							tx
+						),
+					]);
+					return updated;
 				});
+				await websiteService.invalidateCachesAfterMutation({
+					before: website,
+					after: updated,
+				});
+				return updated;
 			} catch (error) {
 				handleServiceError(error);
 			}
@@ -797,21 +962,68 @@ export const websitesRouter = {
 		.input(transferWebsiteToOrgSchema)
 		.output(websiteOutputSchema)
 		.handler(async ({ context, input }) => {
-			await withWorkspace(context, {
-				websiteId: input.websiteId,
-				permissions: ["update"],
-			});
-
-			await withWorkspace(context, {
-				organizationId: input.targetOrganizationId,
+			const website = await authorizeTransfer(context, {
 				resource: "website",
-				permissions: ["create"],
+				id: input.websiteId,
+				targetOrganizationId: input.targetOrganizationId,
 			});
 
 			try {
-				return await websiteService.updateById(input.websiteId, {
-					organizationId: input.targetOrganizationId,
+				const updated = await context.db.transaction(async (tx) => {
+					const updated = await websiteService.updateInTransaction(
+						tx,
+						input.websiteId,
+						{ organizationId: input.targetOrganizationId }
+					);
+					await Promise.all([
+						appendRpcAuditEvent(
+							context,
+							website.organizationId,
+							{
+								action: auditActions.WEBSITE_TRANSFERRED,
+								operation: "websites.transferToOrganization",
+								target: {
+									id: updated.id,
+									displayName: updated.name ?? updated.domain,
+								},
+								changes: {
+									organizationId: {
+										before: website.organizationId,
+										after: input.targetOrganizationId,
+									},
+								},
+								metadata: { transferDirection: "outbound" },
+							},
+							tx
+						),
+						appendRpcAuditEvent(
+							context,
+							input.targetOrganizationId,
+							{
+								action: auditActions.WEBSITE_TRANSFERRED,
+								operation: "websites.transferToOrganization",
+								target: {
+									id: updated.id,
+									displayName: updated.name ?? updated.domain,
+								},
+								changes: {
+									organizationId: {
+										before: website.organizationId,
+										after: input.targetOrganizationId,
+									},
+								},
+								metadata: { transferDirection: "inbound" },
+							},
+							tx
+						),
+					]);
+					return updated;
 				});
+				await websiteService.invalidateCachesAfterMutation({
+					before: website,
+					after: updated,
+				});
+				return updated;
 			} catch (error) {
 				handleServiceError(error);
 			}
@@ -876,24 +1088,58 @@ export const websitesRouter = {
 		.input(updateWebsiteSettingsSchema)
 		.output(websiteOutputSchema)
 		.handler(async ({ context, input }) => {
-			const { website } = await withWorkspace(context, {
+			const workspace = await withWorkspace(context, {
 				websiteId: input.id,
 				permissions: ["update"],
 			});
+			const { website } = workspace;
 
 			if (input.settings === undefined) {
 				return website;
 			}
+			const settings = input.settings;
 
 			const nextSettings = mergeWebsiteSecuritySettings(
 				website.settings,
-				input.settings
+				settings
 			);
 
 			let updatedWebsite: Website;
 			try {
-				updatedWebsite = await websiteService.updateById(input.id, {
-					settings: nextSettings,
+				updatedWebsite = await context.db.transaction(async (tx) => {
+					const updated = await websiteService.updateInTransaction(
+						tx,
+						input.id,
+						{
+							settings: nextSettings,
+						}
+					);
+					await appendRpcAuditEvent(
+						context,
+						workspace.organizationId,
+						{
+							action: auditActions.WEBSITE_SETTINGS_UPDATED,
+							operation: "websites.updateSettings",
+							target: {
+								id: updated.id,
+								displayName: updated.name ?? updated.domain,
+							},
+							metadata: {
+								allowedIpsUpdated: settings.allowedIps !== undefined,
+								allowedOriginsUpdated: settings.allowedOrigins !== undefined,
+								ignoredTrackingOriginsUpdated:
+									settings.ignoredTrackingOrigins !== undefined,
+								trackingWarningPreferenceUpdated:
+									settings.trackingIssueWarningsDisabled !== undefined,
+							},
+						},
+						tx
+					);
+					return updated;
+				});
+				await websiteService.invalidateCachesAfterMutation({
+					before: website,
+					after: updatedWebsite,
 				});
 			} catch (error) {
 				handleServiceError(error);

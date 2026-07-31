@@ -1,32 +1,32 @@
-import { type ApiKeyRow, hasGlobalAccess } from "@databuddy/api-keys/resolve";
+import { type ApiKeyRow, hasKeyScope } from "@databuddy/api-keys/resolve";
 import { auth } from "@databuddy/auth";
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { getAccessibleWebsites } from "../../lib/accessible-websites";
-import { getWebsiteDomain } from "../../lib/website-utils";
-import { executeBatch, executeQuery } from "../../query";
-import type { QueryRequest } from "../../query/types";
+import { executeBatch } from "../../query";
 import { createAnnotationTools } from "../tools/annotations";
+import { createFeedbackTools } from "../tools/feedback";
 import { createFlagTools } from "../tools/flags";
 import { createFunnelTools } from "../tools/funnels";
 import { createGoalTools } from "../tools/goals";
-import { createInsightDigestTools } from "../tools/insight-digest";
 import { createLinksTools } from "../tools/links";
 import { createMemoryTools } from "../tools/memory";
+import { buildProfileTools } from "../tools/profiles";
+import { createToolkit } from "../tools/toolkit";
 import { executeAgentSqlForWebsite } from "../tools/execute-sql-query";
 import {
 	buildBatchQueryRequests,
 	FilterSchema,
+	formatMcpQueryResults,
 	MCP_DATE_PRESETS,
 } from "./mcp-utils";
-import { createMcpProfileTools } from "./profile-tools";
 import {
 	createSlackConversationTools,
 	type DatabuddyAgentSlackContext,
 } from "./slack-context";
 import { ensureWebsiteAccess } from "./tool-context";
 
-export interface McpAgentContext {
+interface McpAgentContext {
 	apiKey: ApiKeyRow | null;
 	organizationId?: string | null;
 	requestHeaders: Headers;
@@ -49,12 +49,23 @@ function getToolContext(options: unknown): McpAgentContext {
 }
 
 export function createMcpAgentTools(
-	options: { slackContext?: DatabuddyAgentSlackContext | null } = {}
+	options: {
+		slackContext?: DatabuddyAgentSlackContext | null;
+		organizationId?: string | null;
+		userId?: string | null;
+		websiteDomain?: string | null;
+	} = {}
 ): ToolSet {
+	const investigationTools = createToolkit({
+		capabilities: ["investigation"],
+		organizationId: options.organizationId ?? undefined,
+		userId: options.userId ?? undefined,
+		domain: options.websiteDomain ?? undefined,
+	});
 	return {
 		list_websites: tool({
 			description:
-				"List all websites accessible with the current API key. Call this FIRST to discover website IDs before any analytics query. Required before execute_query_builder or execute_sql_query.",
+				"List all websites accessible with the current API key. Call this first when a website is not already selected.",
 			strict: true,
 			inputSchema: z.object({}),
 			execute: async (_args, options) => {
@@ -62,7 +73,8 @@ export function createMcpAgentTools(
 				const session = ctx.userId
 					? await auth.api.getSession({ headers: ctx.requestHeaders })
 					: null;
-				const scopedApiKey = ctx.apiKey && !hasGlobalAccess(ctx.apiKey);
+				const scopedApiKey =
+					ctx.apiKey && !hasKeyScope(ctx.apiKey, "read:data");
 				const authCtx = {
 					apiKey: ctx.apiKey,
 					organizationId: scopedApiKey
@@ -89,60 +101,10 @@ export function createMcpAgentTools(
 				};
 			},
 		}),
-		execute_query_builder: tool({
-			description:
-				"Single pre-built analytics query. Prefer get_data for analytics requests because it batches 1-10 builders. Covers traffic, pages, sessions, errors, performance, vitals, custom events, profiles, links, uptime, LLM, and revenue. If a type is invalid, the server returns valid options.",
-			strict: true,
-			inputSchema: z.object({
-				websiteId: z.string(),
-				type: z.string(),
-				from: z.string(),
-				to: z.string(),
-				timeUnit: z.enum(["minute", "hour", "day", "week", "month"]).optional(),
-				filters: z.array(FilterSchema).optional(),
-				groupBy: z.array(z.string()).optional(),
-				orderBy: z.string().optional(),
-				limit: z.number().min(1).max(1000).optional(),
-				offset: z.number().min(0).optional(),
-				timezone: z.string().optional(),
-			}),
-			execute: async (args, options) => {
-				const ctx = getToolContext(options);
-				const access = await ensureWebsiteAccess(
-					args.websiteId,
-					ctx.requestHeaders,
-					ctx.apiKey
-				);
-				if (access instanceof Error) {
-					throw new Error(access.message);
-				}
-				const websiteDomain =
-					(await getWebsiteDomain(args.websiteId)) ?? "unknown";
-				const queryRequest: QueryRequest = {
-					projectId: args.websiteId,
-					type: args.type,
-					from: args.from,
-					to: args.to,
-					timeUnit: args.timeUnit,
-					filters: args.filters,
-					groupBy: args.groupBy,
-					orderBy: args.orderBy,
-					limit: args.limit,
-					offset: args.offset,
-					timezone: args.timezone ?? "UTC",
-				};
-				const data = await executeQuery(
-					queryRequest,
-					websiteDomain,
-					queryRequest.timezone
-				);
-				return { data, rowCount: data.length, type: args.type };
-			},
-		}),
 		execute_sql_query: tool({
-			description: `Custom read-only ClickHouse SQL. SELECT/WITH only. Use {paramName:Type} for parameters. websiteId and websiteDomain are bound server-side from the verified website argument; tool args of those names in params are ignored. UNION, INTERSECT, EXCEPT, subqueries, and comma-joins are not allowed — use CTEs instead. Every WHERE must AND \`client_id = {websiteId:String}\` at top level. Use only when get_data/query builders cannot answer.
+			description: `Custom read-only ClickHouse SQL. SELECT/WITH only. Use {paramName:Type} for parameters. websiteId and websiteDomain are bound server-side from the verified website argument; tool args of those names in params are ignored. UNION, INTERSECT, EXCEPT, subqueries, and comma-joins are not allowed; use CTEs instead. Every WHERE must AND \`client_id = {websiteId:String}\` at top level. Use only when get_data/query builders cannot answer.
 
-Canonical analytics.events schema: client_id, anonymous_id, session_id, time, path, referrer, browser_name, os_name, device_type, country, region, city, utm_source, utm_medium, utm_campaign, utm_term, utm_content, load_time, time_on_page, scroll_depth, properties, event_name.
+Canonical analytics.events schema: client_id, anonymous_id, session_id, time, path, referrer, browser_name, os_name, device_type, country, region, city, utm_source, utm_medium, utm_campaign, utm_term, utm_content, time_on_page, scroll_depth, event_name.
 
 Critical schema footguns: website id column is client_id (not website_id); timestamp is time (not created_at); page URL path is path (not page_path); event discriminator is event_name (not event_type); pageviews are event_name = 'screen_view' (never 'pageview'). Custom events are easy to query incorrectly; use get_data custom_events_* builders instead.`,
 			strict: true,
@@ -161,20 +123,19 @@ Critical schema footguns: website id column is client_id (not website_id); times
 				if (access instanceof Error) {
 					throw new Error(access.message);
 				}
-				const websiteDomain =
-					(await getWebsiteDomain(args.websiteId)) ?? "unknown";
 				return executeAgentSqlForWebsite({
 					websiteId: args.websiteId,
-					websiteDomain,
+					websiteDomain: access.domain,
 					sql: args.sql,
 					params: args.params,
 					toolName: "MCP Agent SQL",
+					abortSignal: options.abortSignal,
 				});
 			},
 		}),
 		get_data: tool({
 			description:
-				"Run 1-10 pre-built analytics queries in one call. Preferred for explicit analytics requests. Covers traffic, pages, sessions, errors, performance, vitals, custom events, profiles, links, uptime, LLM, and revenue. Use preset (last_7d/last_30d/etc.) or from/to dates. Supports filters, groupBy, orderBy. If a type is invalid, the server returns valid options.",
+				"Run 1-10 analytics builders. Use preset or from/to; supports filters (including trait:<key>), groupBy, and orderBy. Returns a query summary, full rowCount, returnedRows, truncated, and up to 20 data rows. Call list_profile_traits before trait segmentation.",
 			strict: true,
 			inputSchema: z.object({
 				websiteId: z.string(),
@@ -210,39 +171,49 @@ Critical schema footguns: website id column is client_id (not website_id); times
 				if (access instanceof Error) {
 					throw new Error(access.message);
 				}
-				const buildResult = buildBatchQueryRequests(
+				const plan = buildBatchQueryRequests(
 					args.queries,
 					args.websiteId,
 					args.timezone ?? "UTC"
 				);
-				if ("error" in buildResult) {
-					throw new Error(buildResult.error);
-				}
-				const websiteDomain =
-					(await getWebsiteDomain(args.websiteId)) ?? "unknown";
-				const results = await executeBatch(buildResult.requests, {
-					websiteDomain,
+				const results = await executeBatch(plan.requests, {
+					websiteDomain: access.domain,
 					timezone: args.timezone ?? "UTC",
+					abortSignal: options.abortSignal,
 				});
 				return {
 					batch: true,
-					results: results.map((r) => ({
-						type: r.type,
-						data: r.data,
-						rowCount: r.data.length,
-						...(r.error && { error: "Query failed" }),
-					})),
+					results: formatMcpQueryResults(plan, results),
 				};
 			},
 		}),
 		...createMemoryTools(),
-		...createMcpProfileTools(),
+		...buildProfileTools({
+			loggerName: "MCP Profiles",
+			websiteIdSchema: z.string(),
+			resolveSite: async (websiteId, toolOptions) => {
+				if (!websiteId) {
+					throw new Error("websiteId is required");
+				}
+				const ctx = getToolContext(toolOptions);
+				const access = await ensureWebsiteAccess(
+					websiteId,
+					ctx.requestHeaders,
+					ctx.apiKey
+				);
+				if (access instanceof Error) {
+					throw access;
+				}
+				return { websiteId, domain: access.domain };
+			},
+		}),
 		...createFlagTools(),
 		...createFunnelTools(),
 		...createGoalTools(),
 		...createAnnotationTools(),
 		...createLinksTools(),
-		...createInsightDigestTools(),
+		...createFeedbackTools(),
 		...createSlackConversationTools(options.slackContext),
+		...investigationTools,
 	};
 }

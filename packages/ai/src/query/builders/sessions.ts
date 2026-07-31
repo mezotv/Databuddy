@@ -10,8 +10,16 @@ function inclusiveEndDate(endDate: string): string {
 
 export const SessionsBuilders: Record<string, SimpleQueryConfig> = {
 	session_metrics: {
+		meta: {
+			description:
+				"Aggregate session statistics including total sessions, avg duration, and pages per session.",
+			category: "Sessions",
+			tags: ["sessions", "metrics", "overview"],
+		},
 		customSql: (ctx) => {
-			const { websiteId, startDate, endDate } = ctx;
+			const { websiteId, startDate, endDate, filterConditions, filterParams } =
+				ctx;
+			const filterClause = appendFilterClause(filterConditions);
 			return {
 				sql: `
 				WITH session_rollup AS (
@@ -27,23 +35,30 @@ export const SessionsBuilders: Record<string, SimpleQueryConfig> = {
 						AND time >= toDateTime({startDate:String})
 						AND time <= toDateTime(concat({endDate:String}, ' 23:59:59'))
 						AND session_id != ''
+						${filterClause}
 					GROUP BY session_id
 				)
 				SELECT
-					count() as total_sessions,
-					round(avgIf(duration, duration > 0), 2) as avg_session_duration,
-					round((countIf(page_views <= 1 AND duration < 10 AND engagement_events = 0) / nullIf(count(), 0)) * 100, 2) as bounce_rate,
+					countIf(page_views >= 1) as total_sessions,
+					round(avgIf(duration, page_views >= 1 AND duration > 0), 2) as avg_session_duration,
+					round((countIf(page_views = 1 AND duration < 10 AND engagement_events = 0) / nullIf(countIf(page_views >= 1), 0)) * 100, 2) as bounce_rate,
 					sum(total_events) as total_events
 				FROM session_rollup
 			`,
-				params: { websiteId, startDate, endDate },
+				params: { websiteId, startDate, endDate, ...filterParams },
 			};
 		},
 		timeField: "time",
+		allowedFilters: ["profile_id", "anonymous_id"],
 		customizable: true,
 	} satisfies SimpleQueryConfig,
 
 	session_duration_distribution: {
+		meta: {
+			description: "Distribution of sessions by duration buckets.",
+			category: "Sessions",
+			tags: ["sessions", "duration", "distribution"],
+		},
 		table: Analytics.events,
 		fields: [
 			"CASE " +
@@ -61,58 +76,82 @@ export const SessionsBuilders: Record<string, SimpleQueryConfig> = {
 		groupBy: ["duration_range"],
 		orderBy: "sessions DESC",
 		timeField: "time",
+		allowedFilters: ["profile_id", "anonymous_id"],
 		customizable: true,
 	} satisfies SimpleQueryConfig,
 
 	sessions_by_device: {
+		meta: {
+			description: "Session counts grouped by device type.",
+			category: "Sessions",
+			tags: ["sessions", "devices"],
+		},
 		table: Analytics.events,
 		fields: [
-			"device_type as name",
+			"if(ifNull(device_type, '') = '', 'Desktop', initCap(device_type)) as name",
 			"uniq(session_id) as sessions",
 			"uniq(anonymous_id) as visitors",
-			"ROUND(AVG(CASE WHEN time_on_page > 0 THEN time_on_page / 1000 ELSE NULL END), 2) as avg_session_duration",
 		],
-		where: ["event_name = 'screen_view'", "device_type != ''"],
-		groupBy: ["device_type"],
+		where: ["event_name = 'screen_view'"],
+		groupBy: ["name"],
 		orderBy: "sessions DESC",
 		timeField: "time",
+		allowedFilters: ["profile_id", "anonymous_id"],
 		customizable: true,
 	} satisfies SimpleQueryConfig,
 
 	sessions_by_browser: {
+		meta: {
+			description: "Session counts grouped by browser.",
+			category: "Sessions",
+			tags: ["sessions", "browsers"],
+		},
 		table: Analytics.events,
 		fields: [
 			"browser_name as name",
 			"uniq(session_id) as sessions",
 			"uniq(anonymous_id) as visitors",
-			"ROUND(AVG(CASE WHEN time_on_page > 0 THEN time_on_page / 1000 ELSE NULL END), 2) as avg_session_duration",
 		],
 		where: ["event_name = 'screen_view'", "browser_name != ''"],
 		groupBy: ["browser_name"],
 		orderBy: "sessions DESC",
 		limit: 100,
 		timeField: "time",
+		allowedFilters: ["profile_id", "anonymous_id"],
 		customizable: true,
 	} satisfies SimpleQueryConfig,
 
 	sessions_time_series: {
+		meta: {
+			description: "Session counts plotted over time.",
+			category: "Sessions",
+			tags: ["sessions", "time-series"],
+		},
 		table: Analytics.events,
 		fields: [
 			"toDate(time) as date",
 			"uniq(session_id) as sessions",
 			"uniq(anonymous_id) as visitors",
-			"ROUND(AVG(CASE WHEN time_on_page > 0 THEN time_on_page / 1000 ELSE NULL END), 2) as avg_session_duration",
 		],
 		where: ["event_name = 'screen_view'"],
 		groupBy: ["toDate(time)"],
 		orderBy: "date ASC",
 		timeField: "time",
+		allowedFilters: ["profile_id", "anonymous_id"],
 		customizable: true,
 	} satisfies SimpleQueryConfig,
 
 	session_flow: {
+		meta: {
+			description:
+				"Page-to-page transitions within sessions (from_path → to_path), ranked by transition count.",
+			category: "Sessions",
+			tags: ["sessions", "flow", "paths", "transitions"],
+		},
 		customSql: (ctx) => {
-			const { websiteId, startDate, endDate } = ctx;
+			const { websiteId, startDate, endDate, filterConditions, filterParams } =
+				ctx;
+			const filterClause = appendFilterClause(filterConditions);
 			return {
 				sql: `
 				WITH page_events AS (
@@ -132,6 +171,7 @@ export const SessionsBuilders: Record<string, SimpleQueryConfig> = {
 						AND event_name = 'screen_view'
 						AND session_id != ''
 						AND path != ''
+						${filterClause}
 				)
 				SELECT
 					path as from_path,
@@ -145,14 +185,26 @@ export const SessionsBuilders: Record<string, SimpleQueryConfig> = {
 				ORDER BY transitions DESC
 				LIMIT 100
 			`,
-				params: { websiteId, startDate, endDate: inclusiveEndDate(endDate) },
+				params: {
+					websiteId,
+					startDate,
+					endDate: inclusiveEndDate(endDate),
+					...filterParams,
+				},
 			};
 		},
 		timeField: "time",
+		allowedFilters: ["profile_id", "anonymous_id"],
 		customizable: true,
 	} satisfies SimpleQueryConfig,
 
 	session_pages: {
+		meta: {
+			description:
+				"Pages ranked by how many sessions and visitors viewed them; useful for product usage hotspots, not path transitions.",
+			category: "Sessions",
+			tags: ["sessions", "pages", "usage"],
+		},
 		table: Analytics.events,
 		fields: [
 			"path as name",
@@ -164,14 +216,23 @@ export const SessionsBuilders: Record<string, SimpleQueryConfig> = {
 		orderBy: "sessions DESC",
 		limit: 100,
 		timeField: "time",
+		allowedFilters: ["profile_id", "anonymous_id"],
 		customizable: true,
 	} satisfies SimpleQueryConfig,
 
 	interesting_sessions: {
+		meta: {
+			description:
+				"Ranked individual sessions worth inspecting, scored by page depth, unique pages, custom events, errors, and duration. Use first for 'dig into sessions' or 'how people use the product'.",
+			category: "Sessions",
+			tags: ["sessions", "investigation", "product-usage"],
+		},
 		customSql: (ctx) => {
-			const { websiteId, startDate, endDate } = ctx;
+			const { websiteId, startDate, endDate, filterConditions, filterParams } =
+				ctx;
 			const limit = ctx.limit ?? 10;
 			const offset = ctx.offset ?? 0;
+			const filterClause = appendFilterClause(filterConditions);
 			return {
 				sql: `
 				WITH base_sessions AS (
@@ -195,6 +256,7 @@ export const SessionsBuilders: Record<string, SimpleQueryConfig> = {
 						AND time >= toDateTime({startDate:String})
 						AND time <= toDateTime({endDate:String})
 						AND session_id != ''
+						${filterClause}
 					GROUP BY session_id
 				),
 				custom_counts AS (
@@ -219,21 +281,21 @@ export const SessionsBuilders: Record<string, SimpleQueryConfig> = {
 				),
 				top_sessions AS (
 					SELECT
-						bs.session_id,
-						bs.visitor_id,
-						bs.first_visit,
-						bs.last_visit,
-						bs.duration_seconds,
-						bs.page_views,
-						bs.unique_pages,
-						bs.analytics_engagement_events,
+						bs.session_id AS session_id,
+						bs.visitor_id AS visitor_id,
+						bs.first_visit AS first_visit,
+						bs.last_visit AS last_visit,
+						bs.duration_seconds AS duration_seconds,
+						bs.page_views AS page_views,
+						bs.unique_pages AS unique_pages,
+						bs.analytics_engagement_events AS analytics_engagement_events,
 						ifNull(cc.custom_events, 0) as custom_events,
 						ifNull(es.errors, 0) as errors,
-						bs.country,
-						bs.referrer,
-						bs.device_type,
-						bs.browser_name,
-						bs.os_name,
+						bs.country AS country,
+						bs.referrer AS referrer,
+						bs.device_type AS device_type,
+						bs.browser_name AS browser_name,
+						bs.os_name AS os_name,
 						(
 							least(bs.page_views, 10) * 2
 							+ least(bs.unique_pages, 8) * 3
@@ -257,7 +319,7 @@ export const SessionsBuilders: Record<string, SimpleQueryConfig> = {
 						client_id = {websiteId:String}
 						AND time >= toDateTime({startDate:String})
 						AND time <= toDateTime({endDate:String})
-						AND session_id IN (SELECT session_id FROM top_sessions)
+						AND session_id != ''
 					GROUP BY session_id
 				),
 				names_for_top AS (
@@ -269,7 +331,7 @@ export const SessionsBuilders: Record<string, SimpleQueryConfig> = {
 						website_id = {websiteId:String}
 						AND timestamp >= toDateTime({startDate:String})
 						AND timestamp <= toDateTime({endDate:String})
-						AND session_id IN (SELECT session_id FROM top_sessions)
+						AND session_id != ''
 					GROUP BY session_id
 				)
 				SELECT
@@ -302,13 +364,21 @@ export const SessionsBuilders: Record<string, SimpleQueryConfig> = {
 					endDate: inclusiveEndDate(endDate),
 					limit,
 					offset,
+					...filterParams,
 				},
 			};
 		},
+		allowedFilters: ["profile_id", "anonymous_id"],
 		plugins: { normalizeGeo: true },
 	} satisfies SimpleQueryConfig,
 
 	session_list: {
+		meta: {
+			description:
+				"List of recent individual sessions with metadata and chronological events.",
+			category: "Sessions",
+			tags: ["sessions", "list", "recent"],
+		},
 		customSql: (ctx) => {
 			const { websiteId, startDate, endDate, filterConditions, filterParams } =
 				ctx;
@@ -424,12 +494,18 @@ export const SessionsBuilders: Record<string, SimpleQueryConfig> = {
 				},
 			};
 		},
+		allowedFilters: ["profile_id", "anonymous_id"],
 		plugins: {
 			normalizeGeo: true,
 		},
 	},
 
 	session_events: {
+		meta: {
+			description: "Events within a specific session in chronological order.",
+			category: "Sessions",
+			tags: ["sessions", "events", "timeline"],
+		},
 		table: Analytics.events,
 		fields: [
 			"session_id",

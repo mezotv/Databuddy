@@ -2,11 +2,20 @@ import crypto from "node:crypto";
 import { cacheable } from "@databuddy/redis/cacheable";
 import { redis } from "@databuddy/redis/redis";
 import { captureError, record } from "@lib/tracing";
+import { sanitizeString, VALIDATION_LIMITS } from "@utils/validation";
 import { CryptoHasher } from "bun";
 import { useLogger } from "evlog/elysia";
 
 const EXIT_EVENT_TTL = 172_800;
 const STANDARD_EVENT_TTL = 86_400;
+const DEDUP_RETRY_DELAY_MS = 25;
+
+const RAW_VISITOR_ID_COUNTRIES = ["US"];
+const COUNTRY_CODES: Record<string, string> = {
+	USA: "US",
+	"UNITED STATES": "US",
+	"UNITED STATES OF AMERICA": "US",
+};
 
 function getCurrentDay(): number {
 	const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -62,6 +71,74 @@ export function saltAnonymousId(anonymousId: string, salt: string): string {
 	}
 }
 
+export function shouldAnonymizeVisitorIds(
+	anonymizeVisitorIds: unknown,
+	visitorCountry?: unknown
+): boolean {
+	if (anonymizeVisitorIds === false) {
+		return false;
+	}
+
+	if (anonymizeVisitorIds !== "auto") {
+		return true;
+	}
+
+	const country =
+		typeof visitorCountry === "string"
+			? visitorCountry.trim().toUpperCase()
+			: "";
+	const code = country.length === 2 ? country : COUNTRY_CODES[country];
+	return !RAW_VISITOR_ID_COUNTRIES.includes(code ?? "");
+}
+
+export function applyVisitorIdPrivacy(
+	anonymousId: unknown,
+	anonymizeVisitorIds: boolean,
+	salt?: string
+): string {
+	const sanitized = sanitizeString(
+		anonymousId,
+		VALIDATION_LIMITS.SHORT_STRING_MAX_LENGTH
+	);
+	if (!sanitized) {
+		// Required ClickHouse String columns use "" for missing IDs; do not
+		// hash an empty value into a fake day-stable visitor.
+		return "";
+	}
+
+	if (!anonymizeVisitorIds) {
+		return sanitized;
+	}
+
+	if (!salt) {
+		throw new Error(
+			"applyVisitorIdPrivacy requires a salt when anonymizeVisitorIds is true"
+		);
+	}
+
+	return saltAnonymousId(sanitized, salt);
+}
+
+function wait(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function setDedupKey(key: string, ttl: number): Promise<string | null> {
+	try {
+		return await redis.set(key, "1", "EX", ttl, "NX");
+	} catch (firstError) {
+		await wait(DEDUP_RETRY_DELAY_MS);
+		try {
+			const retryResult = await redis.set(key, "1", "EX", ttl, "NX");
+			// If the first SET succeeded but the client saw an error, retry returns null.
+			// Treat that ambiguous state as first delivery so ingestion fails open.
+			return retryResult ?? "OK";
+		} catch {
+			throw firstError;
+		}
+	}
+}
+
 export function checkDuplicate(
 	eventId: string,
 	eventType: string
@@ -73,7 +150,7 @@ export function checkDuplicate(
 			: STANDARD_EVENT_TTL;
 
 		try {
-			const result = await redis.set(key, "1", "EX", ttl, "NX");
+			const result = await setDedupKey(key, ttl);
 			const isDuplicate = result === null;
 			if (isDuplicate) {
 				useLogger().set({ dedup: { duplicate: true, eventType } });

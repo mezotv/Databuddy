@@ -7,35 +7,49 @@ import {
 	hasKeyScope,
 	isApiKeyPresent,
 } from "@databuddy/api-keys/resolve";
-import { db } from "@databuddy/db";
-import { readBooleanEnv } from "@databuddy/env/boolean";
-import { ratelimit } from "@databuddy/redis/rate-limit";
+import { and, db, eq, inArray } from "@databuddy/db";
+import { profiles } from "@databuddy/db/schema";
+import { config } from "@databuddy/env/app";
 import {
-	getBillingOwner,
-	getOrganizationOwnerId,
-} from "@databuddy/rpc/billing";
+	isTraitFilterField,
+	resolveTraitSegment,
+	revealPii,
+	type TraitFilter,
+	TraitFilterError,
+} from "@databuddy/services/identity";
+import { validateTimezone } from "@databuddy/validation";
+import { readBooleanEnv } from "@databuddy/env/boolean";
+import { getRateLimitHeaders, ratelimit } from "@databuddy/redis/rate-limit";
+import { getBillingOwner } from "@databuddy/rpc/billing";
+import { getOrganizationOwnerId } from "@databuddy/rpc/organization";
 import {
 	type GatedFeatureId,
 	GATED_FEATURES,
 	isFeatureAvailable,
 } from "@databuddy/shared/types/features";
-import type { CustomQueryRequest } from "@databuddy/ai/query/custom-query-types";
-import { compileQuery, executeBatch } from "@databuddy/ai/query";
+import {
+	allowedFilterFields,
+	compileQuery,
+	executeBatch,
+	isFilterFieldAllowed,
+} from "@databuddy/ai/query";
 import {
 	canReadQueryTypesPublicly,
 	QueryBuilders,
 } from "@databuddy/ai/query/builders";
-import { executeCustomQuery } from "@databuddy/ai/query/custom-query-builder";
 import {
 	isNormalizedQueryDate,
 	normalizeClickHouseDateTime,
 } from "@databuddy/ai/query/date-utils";
 import type { Filter, QueryRequest } from "@databuddy/ai/query/types";
 import { Elysia, t } from "elysia";
-import { getAccessibleWebsites } from "../lib/accessible-websites";
-import { resolveDatePreset } from "../lib/date-presets";
-import { mergeWideEvent } from "../lib/tracing";
-import { getCachedWebsiteDomain, getWebsiteDomain } from "../lib/website-utils";
+import { getAccessibleWebsites } from "@databuddy/ai/lib/accessible-websites";
+import {
+	getCachedWebsiteDomain,
+	getWebsiteDomain,
+} from "@databuddy/ai/lib/website-utils";
+import { resolveDatePreset } from "@databuddy/ai/lib/date-presets";
+import { captureError, mergeWideEvent } from "@databuddy/ai/lib/tracing";
 import {
 	CompileRequestSchema,
 	type CompileRequestType,
@@ -43,15 +57,9 @@ import {
 	DynamicQueryRequestSchema,
 	type DynamicQueryRequestType,
 } from "../schemas/query-schemas";
+import { getRequestId } from "../http/request-id";
 
-const parsedPerWebsiteQueryConcurrency = Number(
-	process.env.PER_WEBSITE_QUERY_CONCURRENCY ?? 8
-);
-const PER_WEBSITE_QUERY_CONCURRENCY = Number.isFinite(
-	parsedPerWebsiteQueryConcurrency
-)
-	? Math.max(1, parsedPerWebsiteQueryConcurrency)
-	: 8;
+const PER_WEBSITE_QUERY_CONCURRENCY = 8;
 
 interface KeyedSemaphore {
 	active: number;
@@ -85,32 +93,9 @@ async function runPerWebsite<T>(key: string, fn: () => Promise<T>): Promise<T> {
 	}
 }
 
-const DEFAULT_ALLOWED_FILTERS = [
-	"path",
-	"query_string",
-	"referrer",
-	"country",
-	"region",
-	"city",
-	"timezone",
-	"language",
-	"device_type",
-	"browser_name",
-	"os_name",
-	"utm_source",
-	"utm_medium",
-	"utm_campaign",
-	"provider",
-	"model",
-	"type",
-	"finish_reason",
-	"error_name",
-	"http_status",
-	"user_id",
-	"trace_id",
-] as const;
 const MAX_HOURLY_DAYS = 30;
 const MS_PER_DAY = 86_400_000;
+const PROTECTED_RESOURCE_METADATA_URL = `${config.urls.api}/.well-known/oauth-protected-resource`;
 
 function normalizeDate(input: string): string {
 	return normalizeClickHouseDateTime(input);
@@ -121,6 +106,8 @@ interface ValidationError {
 	message: string;
 	suggestion?: string;
 }
+
+const QUERY_EXECUTION_ERROR_MESSAGE = "Query execution failed";
 
 interface ResolvedDateRange {
 	endDate?: string;
@@ -316,10 +303,6 @@ function validatePaginationFields(
 	return errors;
 }
 
-function generateRequestId(): string {
-	return `req_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
-}
-
 interface AuthContext {
 	// Session active org; used when query omits organization_id.
 	activeOrganizationId: string | null;
@@ -352,7 +335,14 @@ function createAuthFailedResponse(requestId: string): Response {
 			code: "AUTH_REQUIRED",
 			requestId,
 		}),
-		{ status: 401, headers: { "Content-Type": "application/json" } }
+		{
+			status: 401,
+			headers: {
+				"Content-Type": "application/json",
+				"X-Request-ID": requestId,
+				"WWW-Authenticate": `Bearer resource_metadata="${PROTECTED_RESOURCE_METADATA_URL}"`,
+			},
+		}
 	);
 }
 
@@ -367,7 +357,7 @@ function clientIpForQuery(request: Request): string {
 
 async function enforceQueryRateLimit(
 	ctx: AuthContext,
-	endpoint: "compile" | "execute" | "custom",
+	endpoint: "compile" | "execute",
 	limit: number,
 	requestId: string,
 	request: Request
@@ -390,20 +380,24 @@ async function enforceQueryRateLimit(
 	if (rl.success) {
 		return null;
 	}
+	const retryAfter = Math.max(1, Math.ceil((rl.reset - Date.now()) / 1000));
 	return new Response(
 		JSON.stringify({
 			success: false,
 			error: "Rate limit exceeded",
 			code: "RATE_LIMITED",
 			requestId,
+			limit: rl.limit,
+			remaining: rl.remaining,
+			reset: rl.reset,
+			retryAfter,
 		}),
 		{
 			status: 429,
 			headers: {
 				"Content-Type": "application/json",
-				"X-RateLimit-Limit": String(rl.limit),
-				"X-RateLimit-Remaining": String(rl.remaining),
-				"X-RateLimit-Reset": String(rl.reset),
+				"X-Request-ID": requestId,
+				...getRateLimitHeaders(rl),
 			},
 		}
 	);
@@ -416,6 +410,17 @@ function createErrorResponse(
 	requestId?: string,
 	details?: ValidationError[]
 ): Response {
+	const headers: Record<string, string> = {
+		"Content-Type": "application/json",
+	};
+	if (requestId) {
+		headers["X-Request-ID"] = requestId;
+	}
+	if (status === 401) {
+		headers["WWW-Authenticate"] =
+			`Bearer resource_metadata="${PROTECTED_RESOURCE_METADATA_URL}"`;
+	}
+
 	return new Response(
 		JSON.stringify({
 			success: false,
@@ -426,7 +431,7 @@ function createErrorResponse(
 		}),
 		{
 			status,
-			headers: { "Content-Type": "application/json" },
+			headers,
 		}
 	);
 }
@@ -611,7 +616,7 @@ async function verifyScheduleAccess(
 
 	if (ctx.apiKey) {
 		const orgMatch =
-			hasKeyScope(ctx.apiKey, "read:data") &&
+			hasKeyScope(ctx.apiKey, "read:monitors") &&
 			ctx.apiKey.organizationId === schedule.organizationId;
 		if (!orgMatch) {
 			mergeWideEvent({ access_result: "api_key_denied" });
@@ -879,6 +884,51 @@ interface QueryResult {
 	success: boolean;
 }
 
+async function attachProfileIdentities(
+	websiteId: string,
+	results: QueryResult[]
+) {
+	const profileIds = new Set<string>();
+	for (const result of results) {
+		for (const row of result.data) {
+			if (typeof row.profile_id === "string" && row.profile_id) {
+				profileIds.add(row.profile_id);
+			}
+		}
+	}
+	if (profileIds.size === 0) {
+		return;
+	}
+
+	const identities = await db
+		.select({
+			profileId: profiles.profileId,
+			displayName: profiles.displayName,
+			email: profiles.email,
+		})
+		.from(profiles)
+		.where(
+			and(
+				eq(profiles.websiteId, websiteId),
+				inArray(profiles.profileId, [...profileIds])
+			)
+		);
+	const identityByProfileId = new Map(
+		identities.map((identity) => [identity.profileId, identity])
+	);
+
+	for (const result of results) {
+		for (const row of result.data) {
+			const identity =
+				typeof row.profile_id === "string"
+					? identityByProfileId.get(row.profile_id)
+					: undefined;
+			row.display_name = identity ? revealPii(identity.displayName) : null;
+			row.email = identity ? revealPii(identity.email) : null;
+		}
+	}
+}
+
 async function executeDynamicQuery(
 	request: DynamicQueryRequestType,
 	projectId: string,
@@ -909,6 +959,39 @@ async function executeDynamicQuery(
 			? (scope?.organizationWebsiteIds ?? [])
 			: undefined;
 
+	const requestFilters = (request.filters || []) as Filter[];
+	const traitFilters = requestFilters.filter((f) =>
+		isTraitFilterField(f.field)
+	);
+	let effectiveFilters = requestFilters;
+	let traitError: string | null = null;
+	if (traitFilters.length > 0) {
+		if (projectType === "website") {
+			try {
+				const segment = await resolveTraitSegment(
+					projectId,
+					traitFilters as TraitFilter[]
+				);
+				effectiveFilters = [
+					...requestFilters.filter((f) => !isTraitFilterField(f.field)),
+					{ field: "profile_id", op: "in", value: segment },
+				];
+			} catch (error) {
+				if (error instanceof TraitFilterError) {
+					traitError = error.message;
+				} else {
+					captureError(error, {
+						route: "v1/query",
+						step: "resolve_trait_segment",
+					});
+					traitError = "Trait filter failed";
+				}
+			}
+		} else {
+			traitError = "Trait filters are only supported for website queries";
+		}
+	}
+
 	// Org-level custom_events queries: builder scans by owner_id (= organizationId
 	// set at ingestion) via primary key instead of matching website_id.
 	const hasCustomEventsQueries = request.parameters.some((param) => {
@@ -928,8 +1011,19 @@ async function executeDynamicQuery(
 		const paramFrom = start ? normalizeDate(start) : from;
 		const paramTo = end ? normalizeDate(end) : to;
 
-		if (!QueryBuilders[name]) {
+		const config = QueryBuilders[name];
+		if (!config) {
 			return { id, error: `Unknown query type: ${name}` };
+		}
+
+		if (traitError) {
+			return { id, error: traitError };
+		}
+		if (
+			traitFilters.length > 0 &&
+			!isFilterFieldAllowed(config, "profile_id")
+		) {
+			return { id, error: `Trait filters are not supported for ${name}` };
 		}
 
 		if (
@@ -964,7 +1058,9 @@ async function executeDynamicQuery(
 					paramFrom,
 					paramTo
 				),
-				filters: (request.filters || []) as Filter[],
+				filters: effectiveFilters.filter((f) =>
+					isFilterFieldAllowed(config, f.field)
+				),
 				limit: request.limit || 100,
 				offset: request.page ? (request.page - 1) * (request.limit || 100) : 0,
 				timezone,
@@ -1007,12 +1103,35 @@ async function executeDynamicQuery(
 			const param = validParameters[i];
 			const result = results[i];
 			if (param) {
+				if (result?.error) {
+					captureError(new Error(result.error), {
+						query_type: param.request.type,
+						route: "v1/query",
+						step: "execute_batch",
+					});
+				}
 				resultMap.set(param.id, {
 					parameter: param.id,
 					success: !result?.error,
 					data: result?.data || [],
-					error: result?.error,
+					error: result?.error ? QUERY_EXECUTION_ERROR_MESSAGE : undefined,
 				});
+			}
+		}
+
+		if (projectType === "website") {
+			const profileResults = validParameters
+				.filter((p) => p.request.type === "profile_list")
+				.flatMap((p) => resultMap.get(p.id) ?? []);
+			if (profileResults.length > 0) {
+				await attachProfileIdentities(projectId, profileResults).catch(
+					(error) => {
+						captureError(error, {
+							route: "v1/query",
+							step: "attach_profile_identities",
+						});
+					}
+				);
 			}
 		}
 	}
@@ -1061,7 +1180,12 @@ export const query = new Elysia({ prefix: "/v1/query" })
 		]);
 		const user = session?.user ?? null;
 
-		if (apiKey && !hasKeyScope(apiKey, "read:data")) {
+		if (
+			apiKey &&
+			!(
+				hasKeyScope(apiKey, "read:data") || hasKeyScope(apiKey, "read:monitors")
+			)
+		) {
 			return {
 				auth: {
 					apiKey: null,
@@ -1088,9 +1212,9 @@ export const query = new Elysia({ prefix: "/v1/query" })
 		};
 	})
 
-	.get("/websites", ({ auth: ctx }) =>
+	.get("/websites", ({ auth: ctx, request }) =>
 		(async () => {
-			const requestId = generateRequestId();
+			const requestId = getRequestId(request);
 			if (!ctx.isAuthenticated) {
 				return createAuthFailedResponse(requestId);
 			}
@@ -1104,29 +1228,38 @@ export const query = new Elysia({ prefix: "/v1/query" })
 		})()
 	)
 
-	.get("/types", ({ query: params }: { query: { include_meta?: string } }) => {
-		const requestId = generateRequestId();
-		const includeMeta = params.include_meta === "true";
-		const configs = Object.fromEntries(
-			Object.entries(QueryBuilders).map(([key, cfg]) => [
-				key,
-				{
-					allowedFilters: cfg.allowedFilters ?? DEFAULT_ALLOWED_FILTERS,
-					customizable: cfg.customizable,
-					defaultLimit: cfg.limit,
-					publicAccess: cfg.publicAccess === true,
-					...(includeMeta && { meta: cfg.meta }),
-				},
-			])
-		);
-		return {
-			success: true,
-			requestId,
-			types: Object.keys(QueryBuilders),
-			configs,
-			presets: Object.keys(DatePresets),
-		};
-	})
+	.get(
+		"/types",
+		({
+			query: params,
+			request,
+		}: {
+			query: { include_meta?: string };
+			request: Request;
+		}) => {
+			const requestId = getRequestId(request);
+			const includeMeta = params.include_meta === "true";
+			const configs = Object.fromEntries(
+				Object.entries(QueryBuilders).map(([key, cfg]) => [
+					key,
+					{
+						allowedFilters: allowedFilterFields(cfg),
+						customizable: cfg.customizable,
+						defaultLimit: cfg.limit,
+						publicAccess: cfg.publicAccess === true,
+						...(includeMeta && { meta: cfg.meta }),
+					},
+				])
+			);
+			return {
+				success: true,
+				requestId,
+				types: Object.keys(QueryBuilders),
+				configs,
+				presets: Object.keys(DatePresets),
+			};
+		}
+	)
 
 	.post(
 		"/compile",
@@ -1141,7 +1274,7 @@ export const query = new Elysia({ prefix: "/v1/query" })
 			auth: AuthContext;
 			request: Request;
 		}) => {
-			const requestId = generateRequestId();
+			const requestId = getRequestId(request);
 			const rateLimited = await enforceQueryRateLimit(
 				ctx,
 				"compile",
@@ -1173,7 +1306,11 @@ export const query = new Elysia({ prefix: "/v1/query" })
 				return {
 					success: true,
 					requestId,
-					...compileQuery(body as QueryRequest, domain, q.timezone || "UTC"),
+					...compileQuery(
+						body as QueryRequest,
+						domain,
+						validateTimezone(q.timezone) || "UTC"
+					),
 				};
 			} catch (e) {
 				return createErrorResponse(
@@ -1207,8 +1344,8 @@ export const query = new Elysia({ prefix: "/v1/query" })
 			request: Request;
 		}) =>
 			(async () => {
-				const requestId = generateRequestId();
-				const timezone = q.timezone || "UTC";
+				const requestId = getRequestId(request);
+				const timezone = validateTimezone(q.timezone) || "UTC";
 				const rateLimited = await enforceQueryRateLimit(
 					ctx,
 					"execute",
@@ -1322,24 +1459,31 @@ export const query = new Elysia({ prefix: "/v1/query" })
 								timezone,
 								cache,
 								organizationScope
-							).catch((e) => ({
-								queryId: req.id,
-								data: [
-									{
-										parameter: req.parameters[0] as string,
-										success: false,
-										error: e instanceof Error ? e.message : "Query failed",
-										data: [],
+							).catch((error) => {
+								captureError(error, {
+									query_id: req.id,
+									route: "v1/query",
+									step: "execute_dynamic_query",
+								});
+								return {
+									queryId: req.id,
+									data: [
+										{
+											parameter: req.parameters[0] as string,
+											success: false,
+											error: QUERY_EXECUTION_ERROR_MESSAGE,
+											data: [],
+										},
+									],
+									meta: {
+										parameters: req.parameters,
+										total_parameters: req.parameters.length,
+										page: req.page || 1,
+										limit: req.limit || 100,
+										filters_applied: req.filters?.length || 0,
 									},
-								],
-								meta: {
-									parameters: req.parameters,
-									total_parameters: req.parameters.length,
-									page: req.page || 1,
-									limit: req.limit || 100,
-									filters_applied: req.filters?.length || 0,
-								},
-							}));
+								};
+							});
 						})
 					);
 					return { success: true, requestId, batch: true, results };
@@ -1374,128 +1518,5 @@ export const query = new Elysia({ prefix: "/v1/query" })
 				DynamicQueryRequestSchema,
 				t.Array(DynamicQueryRequestSchema),
 			]),
-		}
-	)
-
-	.post(
-		"/custom",
-		async ({
-			body,
-			query: q,
-			auth: ctx,
-			request,
-		}: {
-			body: CustomQueryRequest;
-			query: { website_id?: string };
-			auth: AuthContext;
-			request: Request;
-		}) =>
-			(async () => {
-				const requestId = generateRequestId();
-				const rateLimited = await enforceQueryRateLimit(
-					ctx,
-					"custom",
-					60,
-					requestId,
-					request
-				);
-				if (rateLimited) {
-					return rateLimited;
-				}
-
-				if (!q.website_id) {
-					return createErrorResponse(
-						"website_id is required",
-						"MISSING_WEBSITE_ID",
-						400,
-						requestId
-					);
-				}
-
-				const accessResult = await resolveProjectAccess(ctx, {
-					websiteId: q.website_id,
-				});
-
-				if (!accessResult.success) {
-					return createErrorResponse(
-						accessResult.error,
-						accessResult.code,
-						accessResult.status,
-						requestId
-					);
-				}
-
-				mergeWideEvent({
-					custom_query_table: body.query.table,
-					custom_query_selects: body.query.selects.length,
-					custom_query_filters: body.query.filters?.length || 0,
-				});
-
-				const result = await executeCustomQuery(body, accessResult.projectId);
-
-				if (!result.success) {
-					return createErrorResponse(
-						result.error ?? "Query execution failed",
-						"QUERY_ERROR",
-						400,
-						requestId
-					);
-				}
-
-				return { ...result, requestId };
-			})(),
-		{
-			body: t.Object({
-				query: t.Object({
-					table: t.String(),
-					selects: t.Array(
-						t.Object({
-							field: t.String(),
-							aggregate: t.Union([
-								t.Literal("count"),
-								t.Literal("sum"),
-								t.Literal("avg"),
-								t.Literal("max"),
-								t.Literal("min"),
-								t.Literal("uniq"),
-							]),
-							alias: t.Optional(t.String()),
-						})
-					),
-					filters: t.Optional(
-						t.Array(
-							t.Object({
-								field: t.String(),
-								operator: t.Union([
-									t.Literal("eq"),
-									t.Literal("ne"),
-									t.Literal("gt"),
-									t.Literal("lt"),
-									t.Literal("gte"),
-									t.Literal("lte"),
-									t.Literal("contains"),
-									t.Literal("not_contains"),
-									t.Literal("starts_with"),
-									t.Literal("in"),
-									t.Literal("not_in"),
-								]),
-								value: t.Union([
-									t.String(),
-									t.Number(),
-									t.Array(t.Union([t.String(), t.Number()])),
-								]),
-							})
-						)
-					),
-					groupBy: t.Optional(t.Array(t.String())),
-				}),
-				startDate: t.String(),
-				endDate: t.String(),
-				timezone: t.Optional(t.String()),
-				granularity: t.Optional(
-					t.Union([t.Literal("hourly"), t.Literal("daily")])
-				),
-				limit: t.Optional(t.Number()),
-			}),
 		}
 	);

@@ -1,18 +1,18 @@
 import { ORPCError } from "@orpc/server";
-import { createServiceAuth } from "@databuddy/rpc";
-import { getServerRPCClient } from "../../../lib/orpc-server";
+import type { PreResolvedAuth } from "@databuddy/rpc";
 import type { AppContext } from "../../config/context";
 import { createToolLogger } from "./logger";
 
 const logger = createToolLogger("RPC");
 const MUTATION_METHOD_RE =
-	/^(add|archive|bulk|create|delete|pause|publish|remove|reset|restore|resume|revoke|rotate|send|set|trigger|unarchive|update|upsert)/i;
+	/^(add|archive|bulk|create|delete|detect|pause|publish|remove|reply|reset|restore|resume|revoke|rotate|send|set|trigger|unarchive|update|upsert)/i;
 
 export async function callRPCProcedure(
 	routerName: string,
 	method: string,
 	input: unknown,
-	context: AppContext
+	context: AppContext,
+	abortSignal?: AbortSignal
 ) {
 	try {
 		if (context.mutationMode === "dry-run" && isMutationMethod(method)) {
@@ -25,16 +25,18 @@ export async function callRPCProcedure(
 		}
 
 		const headers = context.requestHeaders ?? new Headers();
-		const preResolved = context.serviceAuth
-			? createServiceAuth(
-					context.serviceAuth.organizationId,
-					context.serviceAuth.scopes
-				)
-			: undefined;
+		const preResolved = resolvePreResolvedAuth(context);
+		const { getServerRPCClient } = await import("../../../lib/orpc-server");
 		const client = await getServerRPCClient(headers, preResolved);
 
 		const router = client[routerName as keyof typeof client] as
-			| Record<string, (input: unknown) => Promise<unknown>>
+			| Record<
+					string,
+					(
+						input: unknown,
+						options?: { signal?: AbortSignal }
+					) => Promise<unknown>
+			  >
 			| undefined;
 		if (!router || typeof router !== "object") {
 			throw new Error(`Router ${routerName} not found`);
@@ -47,7 +49,9 @@ export async function callRPCProcedure(
 			);
 		}
 
-		return await clientFn(input);
+		return await (abortSignal
+			? clientFn(input, { signal: abortSignal })
+			: clientFn(input));
 	} catch (error) {
 		if (error instanceof ORPCError) {
 			logger.error("ORPC error", {
@@ -70,7 +74,7 @@ export async function callRPCProcedure(
 									: error.message ||
 										"An error occurred while processing your request.";
 
-			throw new Error(userMessage);
+			throw new ORPCError(error.code, { message: userMessage });
 		}
 
 		if (error instanceof Error) {
@@ -94,4 +98,10 @@ export async function callRPCProcedure(
 
 function isMutationMethod(method: string): boolean {
 	return MUTATION_METHOD_RE.test(method);
+}
+
+function resolvePreResolvedAuth(
+	context: AppContext
+): PreResolvedAuth | undefined {
+	return context.serviceAuth;
 }

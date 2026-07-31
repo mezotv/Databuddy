@@ -1,4 +1,21 @@
 import type { AppContext } from "../../config/context";
+import { todayInTimeZone } from "../../../query/date-utils";
+
+export function toolDateRangeError(
+	from: string,
+	to: string,
+	context: AppContext,
+	timezone = context.timezone ?? "UTC"
+): string | null {
+	const reference = new Date(context.currentDateTime);
+	const contextDate = todayInTimeZone(
+		timezone,
+		Number.isNaN(reference.getTime()) ? new Date() : reference
+	);
+	return from > contextDate || to > contextDate
+		? `Date range cannot extend beyond context date ${contextDate}`
+		: null;
+}
 
 export function getAppContext(options: {
 	experimental_context?: unknown;
@@ -12,9 +29,13 @@ export function getAppContext(options: {
 	return ctx as AppContext;
 }
 
-export interface ResolvedWebsite {
+interface ResolvedWebsite {
 	domain?: string;
 	websiteId: string;
+}
+
+function normalizeDomain(value?: string | null): string | null {
+	return value?.trim().toLowerCase() || null;
 }
 
 export function resolveToolWebsite(
@@ -27,15 +48,36 @@ export function resolveToolWebsite(
 		(id === ctx.websiteId ? ctx.websiteDomain : undefined);
 
 	if (inputWebsiteId) {
+		// First try direct UUID match
 		const isAccessible =
 			accessible.some((w) => w.id === inputWebsiteId) ||
 			inputWebsiteId === ctx.websiteId;
-		if (!isAccessible) {
-			throw new Error(
-				`Website "${inputWebsiteId}" is not in this workspace. Call list_websites to see available websites.`
-			);
+		if (isAccessible) {
+			return { websiteId: inputWebsiteId, domain: domainFor(inputWebsiteId) };
 		}
-		return { websiteId: inputWebsiteId, domain: domainFor(inputWebsiteId) };
+
+		// Fall back to domain-name lookup — the AI sometimes passes the site's
+		// domain (e.g. "finvzo.com") instead of its UUID.
+		const inputDomain = normalizeDomain(inputWebsiteId);
+		const byDomain = inputDomain
+			? accessible.find((w) => normalizeDomain(w.domain) === inputDomain)
+			: undefined;
+		if (byDomain) {
+			return { websiteId: byDomain.id, domain: byDomain.domain ?? undefined };
+		}
+
+		// Also handle single-site context where the domain is on ctx directly.
+		if (
+			inputDomain &&
+			normalizeDomain(ctx.websiteDomain) === inputDomain &&
+			ctx.websiteId
+		) {
+			return { websiteId: ctx.websiteId, domain: ctx.websiteDomain };
+		}
+
+		throw new Error(
+			`Website "${inputWebsiteId}" is not in this workspace. Call list_websites to see available websites.`
+		);
 	}
 
 	const fallbackId = ctx.defaultWebsiteId ?? ctx.websiteId;

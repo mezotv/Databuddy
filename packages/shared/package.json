@@ -4,6 +4,8 @@
   "version": "0.0.1",
   "type": "module",
   "exports": {
+    "./api-scopes": "./src/api-scopes.ts",
+    "./agent-discovery": "./src/agent-discovery.ts",
     "./country-codes": "./src/country-codes.ts",
     "./types/features": "./src/types/features.ts",
     "./flags": "./src/flags/index.ts",
@@ -15,9 +17,19 @@
     "./json-ld": "./src/json-ld.ts",
     "./ssrf-guard": "./src/ssrf-guard.ts",
     "./constants/deep-link-apps": "./src/constants/deep-link-apps.ts",
+    "./custom-events": "./src/custom-events.ts",
     "./analytics-filters": "./src/analytics-filters.ts",
     "./agent-credits": "./src/agent-credits.ts",
+    "./billing": "./src/billing.ts",
+    "./currency": "./src/currency.ts",
     "./tracking-blocks": "./src/tracking-blocks.ts",
+    "./uptime": "./src/uptime.ts",
+    "./http-error-response": "./src/http-error-response.ts",
+    "./insights": "./src/insights.ts",
+    "./stripe-webhooks": "./src/stripe-webhooks.ts",
+    "./audit": "./src/audit.ts",
+    "./evlog-fields": "./src/evlog-fields.ts",
+    "./evlog-redaction": "./src/evlog-redaction.ts",
     "./evlog-superlog": "./src/evlog-superlog.ts"
   },
   "scripts": {

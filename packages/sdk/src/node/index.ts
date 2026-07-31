@@ -7,7 +7,9 @@ import type {
 	CustomEventInput,
 	DatabuddyConfig,
 	EventResponse,
+	FailureDetails,
 	GlobalProperties,
+	IdentifyInput,
 	Middleware,
 } from "./types";
 
@@ -18,8 +20,11 @@ export type {
 	DatabuddyConfig,
 	EventResponse,
 	GlobalProperties,
+	IdentifyInput,
 	Logger,
 	Middleware,
+	FailureDetails,
+	ProfileTraits,
 } from "./types";
 
 const DEFAULT_API_URL = "https://basket.databuddy.cc";
@@ -27,12 +32,76 @@ const DEFAULT_BATCH_SIZE = 10;
 const DEFAULT_BATCH_TIMEOUT = 2000;
 const DEFAULT_MAX_QUEUE_SIZE = 1000;
 const DEFAULT_MAX_DEDUPLICATION_CACHE_SIZE = 10_000;
+const MIN_RETRY_DELAY = 250;
+const MAX_RETRY_DELAY = 30_000;
+
+type FailedResponse = FailureDetails & {
+	error: string;
+	success: false;
+};
+
+function isRetryableStatus(status: number): boolean {
+	return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+async function responseFailure(response: Response): Promise<FailedResponse> {
+	const text = await response.text().catch(() => "");
+	let payload: Record<string, unknown> | null = null;
+	try {
+		const parsed = text ? JSON.parse(text) : null;
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			payload = parsed as Record<string, unknown>;
+		}
+	} catch {
+		// Non-JSON upstream responses use the HTTP status fallback below.
+	}
+	const serverMessage = payload?.error ?? payload?.message;
+	const requestId =
+		response.headers.get("x-request-id") ??
+		(typeof payload?.requestId === "string" ? payload.requestId : undefined);
+
+	return {
+		success: false,
+		error:
+			typeof serverMessage === "string" && serverMessage.trim()
+				? serverMessage
+				: `HTTP ${response.status}: ${response.statusText || "Request failed"}`,
+		statusCode: response.status,
+		retryable:
+			typeof payload?.retryable === "boolean"
+				? payload.retryable
+				: isRetryableStatus(response.status),
+		...(typeof payload?.code === "string" ? { code: payload.code } : {}),
+		...(typeof payload?.why === "string" ? { why: payload.why } : {}),
+		...(typeof payload?.fix === "string" ? { fix: payload.fix } : {}),
+		...(requestId ? { requestId } : {}),
+	};
+}
+
+function networkFailure(error: unknown): FailedResponse {
+	return {
+		success: false,
+		error: error instanceof Error ? error.message : "Network request failed",
+		code: "NETWORK_ERROR",
+		retryable: true,
+	};
+}
+
+function validationFailure(error: string): FailedResponse {
+	return {
+		success: false,
+		error,
+		code: "VALIDATION_ERROR",
+		retryable: false,
+	};
+}
 
 export class Databuddy {
 	private readonly apiKey: string;
 	private readonly websiteId?: string;
 	private readonly namespace?: string;
 	private readonly source?: string;
+	private readonly anonymizeVisitorIds?: boolean | "auto";
 	private readonly apiUrl: string;
 	private readonly logger: Logger;
 	private readonly enableBatching: boolean;
@@ -41,6 +110,7 @@ export class Databuddy {
 	private readonly maxQueueSize: number;
 	private queue: BatchEventInput[] = [];
 	private flushTimer: ReturnType<typeof setTimeout> | null = null;
+	private retryAttempts = 0;
 	private globalProperties: GlobalProperties = {};
 	private middleware: Middleware[] = [];
 	private readonly enableDeduplication: boolean;
@@ -58,6 +128,7 @@ export class Databuddy {
 		this.websiteId = config.websiteId?.trim();
 		this.namespace = config.namespace?.trim();
 		this.source = config.source?.trim();
+		this.anonymizeVisitorIds = config.anonymizeVisitorIds;
 		this.apiUrl = config.apiUrl?.trim() || DEFAULT_API_URL;
 		this.enableBatching = config.enableBatching !== false;
 		this.batchSize = Math.min(
@@ -105,10 +176,7 @@ export class Databuddy {
 
 	async track(event: CustomEventInput): Promise<EventResponse> {
 		if (!event.name || typeof event.name !== "string") {
-			return {
-				success: false,
-				error: "Event name is required and must be a string",
-			};
+			return validationFailure("Event name is required and must be a string");
 		}
 
 		const batchEvent: BatchEventInput = {
@@ -116,6 +184,9 @@ export class Databuddy {
 			name: event.name,
 			eventId: event.eventId,
 			anonymousId: event.anonymousId,
+			anonymizeVisitorIds:
+				event.anonymizeVisitorIds ?? this.anonymizeVisitorIds,
+			profileId: event.profileId,
 			sessionId: event.sessionId,
 			timestamp: event.timestamp,
 			properties: {
@@ -130,14 +201,14 @@ export class Databuddy {
 		const processedEvent = await this.applyMiddleware(batchEvent);
 		if (!processedEvent) {
 			this.logger.debug("Event dropped by middleware", { name: event.name });
-			return { success: true };
+			return { success: true, delivery: "skipped" };
 		}
 
 		if (this.isDuplicate(processedEvent)) {
 			this.logger.debug("Event deduplicated", {
 				eventId: processedEvent.eventId,
 			});
-			return { success: true };
+			return { success: true, delivery: "skipped" };
 		}
 
 		if (!this.enableBatching) {
@@ -160,7 +231,60 @@ export class Databuddy {
 			return this.flush();
 		}
 
-		return { success: true };
+		return { success: true, delivery: "queued" };
+	}
+
+	/**
+	 * Link a user ID from your system to their tracked activity. Pass the
+	 * client's `anonymousId` (readable via the web SDK's getAnonymousId())
+	 * to connect pre-login events from that device. Requires an API key
+	 * with the track:events scope for the target website.
+	 */
+	async identify(input: IdentifyInput): Promise<EventResponse> {
+		if (typeof input.profileId !== "string" || !input.profileId.trim()) {
+			return validationFailure(
+				"profileId is required and must be a non-empty string"
+			);
+		}
+
+		const websiteId = input.websiteId ?? this.websiteId;
+		if (!websiteId) {
+			return validationFailure(
+				"websiteId is required (set it in config or pass it per call)"
+			);
+		}
+
+		try {
+			const url = `${this.apiUrl}/identify`;
+			const response = await fetch(url, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${this.apiKey}`,
+				},
+				body: JSON.stringify({
+					profileId: input.profileId.trim(),
+					anonymousId: input.anonymousId ?? undefined,
+					traits: input.traits ?? undefined,
+					websiteId,
+				}),
+			});
+
+			if (!response.ok) {
+				const failure = await responseFailure(response);
+				this.logger.error("Identify failed", {
+					status: response.status,
+					code: failure.code,
+					requestId: failure.requestId,
+				});
+				return failure;
+			}
+
+			return { success: true, delivery: "delivered" };
+		} catch (error) {
+			this.logger.error("Identify error", { error });
+			return networkFailure(error);
+		}
 	}
 
 	private toTrackPayload(event: BatchEventInput) {
@@ -174,6 +298,8 @@ export class Databuddy {
 			timestamp,
 			properties: event.properties ?? undefined,
 			anonymousId: event.anonymousId ?? undefined,
+			anonymizeVisitorIds: event.anonymizeVisitorIds ?? undefined,
+			profileId: event.profileId ?? undefined,
 			sessionId: event.sessionId ?? undefined,
 			websiteId: event.websiteId ?? undefined,
 			source: event.source ?? undefined,
@@ -201,23 +327,25 @@ export class Databuddy {
 			});
 
 			if (!response.ok) {
-				const errorText = await response.text().catch(() => "Unknown error");
+				const failure = await responseFailure(response);
 				this.logger.error("Request failed", {
 					status: response.status,
 					statusText: response.statusText,
-					body: errorText,
+					code: failure.code,
+					requestId: failure.requestId,
 				});
-				return {
-					success: false,
-					error: `HTTP ${response.status}: ${response.statusText}`,
-				};
+				return failure;
 			}
 
 			const data = await response.json();
 			this.logger.info("Response received", data);
 
 			if (data.status === "success") {
-				return { success: true, eventId: data.eventId };
+				return {
+					success: true,
+					eventId: data.eventId,
+					delivery: "delivered",
+				};
 			}
 
 			return {
@@ -228,15 +356,20 @@ export class Databuddy {
 			this.logger.error("Request error", {
 				error: error instanceof Error ? error.message : String(error),
 			});
-			return {
-				success: false,
-				error:
-					error instanceof Error ? error.message : "Network request failed",
-			};
+			return networkFailure(error);
 		}
 	}
 
-	private scheduleFlush(): void {
+	private retryDelay(): number {
+		const base = Math.max(
+			MIN_RETRY_DELAY,
+			Math.min(this.batchTimeout, MAX_RETRY_DELAY)
+		);
+		const exponent = Math.min(Math.max(0, this.retryAttempts - 1), 16);
+		return Math.min(base * 2 ** exponent, MAX_RETRY_DELAY);
+	}
+
+	private scheduleFlush(delay = this.batchTimeout): void {
 		if (this.flushTimer) {
 			return;
 		}
@@ -247,7 +380,8 @@ export class Databuddy {
 					error: error instanceof Error ? error.message : String(error),
 				});
 			});
-		}, this.batchTimeout);
+		}, delay);
+		this.flushTimer.unref?.();
 	}
 
 	async flush(): Promise<BatchEventResponse> {
@@ -257,7 +391,13 @@ export class Databuddy {
 		}
 
 		if (this.queue.length === 0) {
-			return { success: true, processed: 0, results: [] };
+			this.retryAttempts = 0;
+			return {
+				success: true,
+				processed: 0,
+				results: [],
+				delivery: "skipped",
+			};
 		}
 
 		const events = [...this.queue];
@@ -265,31 +405,41 @@ export class Databuddy {
 
 		this.logger.info("Flushing events", { count: events.length });
 
-		return await this.batch(events);
+		const result = await this.batch(events);
+		if (!result.success && result.retryable === true) {
+			const pending = [...events, ...this.queue];
+			this.queue = pending.slice(0, this.maxQueueSize);
+			this.retryAttempts += 1;
+			this.scheduleFlush(this.retryDelay());
+			this.logger.warn("Retryable batch failure kept events queued", {
+				queued: this.queue.length,
+				dropped: Math.max(0, pending.length - this.queue.length),
+				retryAttempt: this.retryAttempts,
+				code: result.code,
+				requestId: result.requestId,
+			});
+			return result;
+		}
+		this.retryAttempts = 0;
+		return result;
 	}
 
 	async batch(events: BatchEventInput[]): Promise<BatchEventResponse> {
 		if (!Array.isArray(events)) {
-			return { success: false, error: "Events must be an array" };
+			return validationFailure("Events must be an array");
 		}
 
 		if (events.length === 0) {
-			return { success: false, error: "Events array cannot be empty" };
+			return validationFailure("Events array cannot be empty");
 		}
 
 		if (events.length > 100) {
-			return {
-				success: false,
-				error: "Batch size cannot exceed 100 events",
-			};
+			return validationFailure("Batch size cannot exceed 100 events");
 		}
 
 		for (const event of events) {
 			if (!event.name || typeof event.name !== "string") {
-				return {
-					success: false,
-					error: "All events must have a valid name",
-				};
+				return validationFailure("All events must have a valid name");
 			}
 		}
 
@@ -299,6 +449,8 @@ export class Databuddy {
 				...this.globalProperties,
 				...(event.properties || {}),
 			},
+			anonymizeVisitorIds:
+				event.anonymizeVisitorIds ?? this.anonymizeVisitorIds,
 			websiteId: event.websiteId ?? this.websiteId,
 			namespace: event.namespace ?? this.namespace,
 			source: event.source ?? this.source,
@@ -329,7 +481,12 @@ export class Databuddy {
 		}
 
 		if (processedEvents.length === 0) {
-			return { success: true, processed: 0, results: [] };
+			return {
+				success: true,
+				processed: 0,
+				results: [],
+				delivery: "skipped",
+			};
 		}
 
 		try {
@@ -355,16 +512,14 @@ export class Databuddy {
 			});
 
 			if (!response.ok) {
-				const errorText = await response.text().catch(() => "Unknown error");
+				const failure = await responseFailure(response);
 				this.logger.error("Batch request failed", {
 					status: response.status,
 					statusText: response.statusText,
-					body: errorText,
+					code: failure.code,
+					requestId: failure.requestId,
 				});
-				return {
-					success: false,
-					error: `HTTP ${response.status}: ${response.statusText}`,
-				};
+				return failure;
 			}
 
 			const data = await response.json();
@@ -374,6 +529,7 @@ export class Databuddy {
 				this.rememberEvents(processedEvents);
 				return {
 					success: true,
+					delivery: "delivered",
 					processed: data.processed || processedEvents.length,
 					results: data.results,
 				};
@@ -387,11 +543,7 @@ export class Databuddy {
 			this.logger.error("Batch request error", {
 				error: error instanceof Error ? error.message : String(error),
 			});
-			return {
-				success: false,
-				error:
-					error instanceof Error ? error.message : "Network request failed",
-			};
+			return networkFailure(error);
 		}
 	}
 

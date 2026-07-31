@@ -1,8 +1,22 @@
 import { setAiRequestLoggerProvider } from "@databuddy/ai/lib/request-logger";
+import { isAiGatewayConfigured } from "@databuddy/ai/config/models";
 import { db, shutdownPostgres, sql } from "@databuddy/db";
-import { closeInsightsQueue, getInsightsQueue } from "@databuddy/redis";
+import { clickHouse } from "@databuddy/db/clickhouse";
+import { readBooleanEnv } from "@databuddy/env/boolean";
+import {
+	closeInsightsQueue,
+	getBullMQWorkerConnectionOptions,
+	getInsightsQueue,
+	INSIGHTS_JOB_TIMEOUT_MS,
+	INSIGHTS_QUEUE_ENV_PREFIX,
+	INSIGHTS_QUEUE_NAME,
+	type InsightsQueueJobData,
+} from "@databuddy/redis";
+import { databuddyEvlogRedaction } from "@databuddy/shared/evlog-redaction";
+import { Worker } from "bullmq";
 import { Elysia } from "elysia";
 import { initLogger } from "evlog";
+import { processInsightsJob } from "./jobs";
 import {
 	captureInsightsError,
 	emitInsightsEvent,
@@ -14,14 +28,15 @@ import {
 	ensureInsightsDispatchSchedule,
 	ensureInsightsMaintenanceSchedule,
 } from "./scheduler";
-import { startInsightsWorker } from "./worker";
 
 const environment =
 	process.env.APP_ENV ??
 	process.env.RAILWAY_ENVIRONMENT_NAME ??
 	(process.env.NODE_ENV === "development" ? "development" : "production");
-const workerEnabled = process.env.INSIGHTS_WORKER_ENABLED !== "false";
+const workerEnabled = readBooleanEnv("INSIGHTS_WORKER_ENABLED");
 const DRAIN_TIMEOUT_MS = 10_000;
+const TRANSIENT_REDIS_ERROR =
+	/^READONLY |^ERR caller gone|ECONNRESET|Connection is closed|Socket closed unexpectedly/;
 
 initLogger({
 	env: {
@@ -30,6 +45,7 @@ initLogger({
 		region: process.env.RAILWAY_REPLICA_REGION,
 		commitHash: process.env.RAILWAY_GIT_COMMIT_SHA,
 	},
+	redact: databuddyEvlogRedaction,
 	drain: insightsLoggerDrain,
 	sampling: {},
 });
@@ -52,7 +68,7 @@ process.on("uncaughtException", (error) => {
 });
 
 let shuttingDown = false;
-let insightsWorker: ReturnType<typeof startInsightsWorker> | null = null;
+let insightsWorker: Worker<InsightsQueueJobData> | null = null;
 
 async function withTimeout<T>(
 	promise: Promise<T>,
@@ -124,7 +140,47 @@ async function startRuntime() {
 		worker_enabled: workerEnabled,
 	});
 	if (workerEnabled) {
-		insightsWorker = startInsightsWorker();
+		if (!isAiGatewayConfigured) {
+			throw new Error("INSIGHTS_WORKER_ENABLED requires AI_GATEWAY_API_KEY");
+		}
+		const configuredConcurrency = Number.parseInt(
+			process.env.INSIGHTS_WORKER_CONCURRENCY ?? "",
+			10
+		);
+		const concurrency =
+			Number.isSafeInteger(configuredConcurrency) && configuredConcurrency > 0
+				? configuredConcurrency
+				: 2;
+		emitInsightsEvent("info", "worker.starting", {
+			queue_name: INSIGHTS_QUEUE_NAME,
+			concurrency,
+			lock_duration_ms: INSIGHTS_JOB_TIMEOUT_MS * 2,
+			stalled_interval_ms: INSIGHTS_JOB_TIMEOUT_MS * 3,
+		});
+		insightsWorker = new Worker<InsightsQueueJobData>(
+			INSIGHTS_QUEUE_NAME,
+			async (job) => await processInsightsJob(job),
+			{
+				connection: getBullMQWorkerConnectionOptions({
+					envPrefix: INSIGHTS_QUEUE_ENV_PREFIX,
+				}),
+				concurrency,
+				lockDuration: INSIGHTS_JOB_TIMEOUT_MS * 2,
+				stalledInterval: INSIGHTS_JOB_TIMEOUT_MS * 3,
+			}
+		);
+		insightsWorker.on("stalled", (jobId) => {
+			emitInsightsEvent("warn", "worker.job_stalled", { job_id: jobId });
+		});
+		insightsWorker.on("error", (error) => {
+			const level = TRANSIENT_REDIS_ERROR.test(error.message)
+				? "warn"
+				: "error";
+			emitInsightsEvent(level, "worker.error", {
+				error_message: error.message,
+				error_stack: error.stack,
+			});
+		});
 		await Promise.all([
 			ensureInsightsDispatchSchedule(),
 			ensureInsightsMaintenanceSchedule(),
@@ -151,18 +207,24 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 
 type ProbeResult =
 	| { status: "ok"; latency_ms: number }
-	| { status: "error"; latency_ms: number; error: string };
+	| { status: "error"; latency_ms: number; code: "UNAVAILABLE" };
 
-async function probe(fn: () => Promise<void>): Promise<ProbeResult> {
+async function probe(
+	name: string,
+	fn: () => Promise<void>
+): Promise<ProbeResult> {
 	const start = performance.now();
 	try {
 		await fn();
 		return { status: "ok", latency_ms: Math.round(performance.now() - start) };
 	} catch (error) {
+		captureInsightsError(error, "health.probe_failed", {
+			health_probe: name,
+		});
 		return {
 			status: "error",
 			latency_ms: Math.round(performance.now() - start),
-			error: error instanceof Error ? error.message : "unknown",
+			code: "UNAVAILABLE",
 		};
 	}
 }
@@ -172,17 +234,30 @@ const app = new Elysia()
 		captureInsightsError(error, "http.error", {
 			elysia_code: String(code),
 		});
+		return Response.json(
+			{
+				success: false,
+				error: "Internal server error",
+				code: "INTERNAL_SERVER_ERROR",
+			},
+			{ status: 500 }
+		);
 	})
 	.get("/health/status", async () => {
-		const [postgres, bullmqRedis] = await Promise.all([
-			probe(() => db.execute(sql`SELECT 1`).then(() => {})),
-			probe(async () => {
-				const client = await getInsightsQueue().client;
-				await client.ping();
+		const [postgres, clickhouse, bullmqRedis] = await Promise.all([
+			probe("postgres", () => db.execute(sql`SELECT 1`).then(() => {})),
+			probe("clickhouse", async () => {
+				const { success } = await clickHouse.ping();
+				if (!success) {
+					throw new Error("ping failed");
+				}
+			}),
+			probe("bullmqRedis", async () => {
+				await getInsightsQueue().count();
 			}),
 		]);
 
-		const services = { postgres, bullmqRedis };
+		const services = { postgres, clickhouse, bullmqRedis };
 		const status = Object.values(services).every((s) => s.status === "ok")
 			? "ok"
 			: "degraded";

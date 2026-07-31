@@ -4,6 +4,10 @@
   "version": "1.0.0",
   "type": "module",
   "exports": {
+    "./billing-lifecycle": "./src/billing-lifecycle.ts",
+    "./audit": "./src/audit.ts",
+    "./feedback": "./src/feedback.ts",
+    "./identity": "./src/identity.ts",
     "./websites": "./src/websites.ts"
   },
   "scripts": {
@@ -11,7 +15,9 @@
   },
   "dependencies": {
     "@databuddy/db": "workspace:*",
-    "@databuddy/redis": "workspace:*"
+    "@databuddy/encryption": "workspace:*",
+    "@databuddy/redis": "workspace:*",
+    "@databuddy/shared": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.9.3"

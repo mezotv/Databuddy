@@ -8,7 +8,7 @@ import { ORPCError, onError } from "@orpc/server";
 import { RPCHandler } from "@orpc/server/fetch";
 import { useLogger } from "evlog/elysia";
 import { getResolvedAuth } from "@/lib/auth-wide-event";
-import { record } from "@/lib/tracing";
+import { getRequestId } from "@/http/request-id";
 import { logOrpcHandlerError } from "./interceptors";
 
 export type OrpcContext = Awaited<ReturnType<typeof createRPCContext>>;
@@ -26,15 +26,11 @@ export const rpcHandler = new RPCHandler(appRouter, {
 
 export function createAuthenticatedOrpcContext(request: Request) {
 	const preResolvedAuth = getPreResolvedAuth(request.headers);
-	return record("rpc.context", () =>
-		createRPCContext({ headers: request.headers }, preResolvedAuth)
-	);
+	return createRPCContext({ headers: request.headers }, preResolvedAuth);
 }
 
 export function createAnonymousOrpcContext(request: Request) {
-	return record("rpc.context", () =>
-		createRPCContext({ headers: request.headers }, ANONYMOUS_AUTH)
-	);
+	return createRPCContext({ headers: request.headers }, ANONYMOUS_AUTH);
 }
 
 export function handleAuthenticatedOrpcRequest(
@@ -56,10 +52,22 @@ async function handleOrpcRequest(
 	createContext: (request: Request) => Promise<OrpcContext>,
 	handle: OrpcRouteHandler
 ) {
+	const requestId = getRequestId(request);
 	try {
 		const context = await createContext(request);
 		const result = await handle(request, context);
-		return result.response ?? new Response("Not Found", { status: 404 });
+		return (
+			result.response ??
+			Response.json(
+				{
+					success: false,
+					error: "Not found",
+					code: "NOT_FOUND",
+					requestId,
+				},
+				{ status: 404, headers: { "X-Request-ID": requestId } }
+			)
+		);
 	} catch (error) {
 		if (error instanceof ORPCError) {
 			recordORPCError({ code: error.code, message: error.message });
@@ -68,7 +76,15 @@ async function handleOrpcRequest(
 			error instanceof Error ? error : new Error(String(error)),
 			{ rpc: "handler" }
 		);
-		return new Response("Internal Server Error", { status: 500 });
+		return Response.json(
+			{
+				success: false,
+				error: "An internal server error occurred",
+				code: "INTERNAL_SERVER_ERROR",
+				requestId,
+			},
+			{ status: 500, headers: { "X-Request-ID": requestId } }
+		);
 	}
 }
 

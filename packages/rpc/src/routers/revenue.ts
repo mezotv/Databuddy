@@ -5,6 +5,7 @@ import { z } from "zod";
 import { rpcError } from "../errors";
 import { protectedProcedure, sessionProcedure } from "../orpc";
 import { withWorkspace } from "../procedures/with-workspace";
+import { revenueUpsertInputSchema } from "./revenue.schemas";
 
 function generateHash(): string {
 	const bytes = crypto.getRandomValues(new Uint8Array(24));
@@ -71,22 +72,18 @@ export const revenueRouter = {
 			summary: "Upsert revenue config",
 			tags: ["Revenue"],
 		})
-		.input(
-			z.object({
-				websiteId: z.string().optional(),
-				stripeWebhookSecret: z.string().optional(),
-				paddleWebhookSecret: z.string().optional(),
-				currency: z.string().length(3).optional(),
-			})
-		)
+		.input(revenueUpsertInputSchema)
 		.output(revenueOutputSchema)
 		.handler(async ({ context, input }) => {
-			const workspace = await withWorkspace(context, {
-				...(input.websiteId
-					? { websiteId: input.websiteId }
-					: { resource: "website" as const }),
-				permissions: ["update"],
-			});
+			const workspace = input.websiteId
+				? await withWorkspace(context, {
+						websiteId: input.websiteId,
+						permissions: ["update"],
+					})
+				: await withWorkspace(context, {
+						resource: "website",
+						permissions: ["update"],
+					});
 
 			const ownerId = workspace.organizationId;
 
@@ -154,12 +151,15 @@ export const revenueRouter = {
 		.input(z.object({ websiteId: z.string().optional() }))
 		.output(z.object({ webhookHash: z.string() }))
 		.handler(async ({ context, input }) => {
-			const workspace = await withWorkspace(context, {
-				...(input.websiteId
-					? { websiteId: input.websiteId }
-					: { resource: "website" as const }),
-				permissions: ["update"],
-			});
+			const workspace = input.websiteId
+				? await withWorkspace(context, {
+						websiteId: input.websiteId,
+						permissions: ["update"],
+					})
+				: await withWorkspace(context, {
+						resource: "website",
+						permissions: ["update"],
+					});
 
 			const ownerId = workspace.organizationId;
 
@@ -181,42 +181,5 @@ export const revenueRouter = {
 				.where(eq(revenueConfig.id, existing.id));
 
 			return { webhookHash: newHash };
-		}),
-
-	delete: sessionProcedure
-		.route({
-			description: "Deletes revenue config. Requires configure permission.",
-			method: "POST",
-			path: "/revenue/delete",
-			summary: "Delete revenue config",
-			tags: ["Revenue"],
-		})
-		.input(z.object({ websiteId: z.string().optional() }))
-		.output(z.object({ deleted: z.literal(true) }))
-		.handler(async ({ context, input }) => {
-			const workspace = await withWorkspace(context, {
-				...(input.websiteId
-					? { websiteId: input.websiteId }
-					: { resource: "website" as const }),
-				permissions: ["update"],
-			});
-
-			const ownerId = workspace.organizationId;
-
-			const existing = await context.db.query.revenueConfig.findFirst({
-				where: input.websiteId
-					? { ownerId, websiteId: input.websiteId }
-					: { ownerId, websiteId: { isNull: true } },
-			});
-
-			if (!existing) {
-				throw rpcError.notFound("Revenue config");
-			}
-
-			await context.db
-				.delete(revenueConfig)
-				.where(eq(revenueConfig.id, existing.id));
-
-			return { deleted: true };
 		}),
 };

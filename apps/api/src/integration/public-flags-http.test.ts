@@ -137,7 +137,7 @@ describe("public flags HTTP integration", () => {
 				createdBy: user.id,
 				defaultValue: true,
 				key: "user-only",
-				userId: "customer-1",
+				userId: user.id,
 				websiteId: website.id,
 			});
 			const targetFlag = await insertFlag({
@@ -216,7 +216,7 @@ describe("public flags HTTP integration", () => {
 			await expect(
 				json(
 					await get(
-						`/v1/flags/evaluate?clientId=${website.id}&key=user-only&userId=customer-1`
+						`/v1/flags/evaluate?clientId=${website.id}&key=user-only&userId=${user.id}`
 					)
 				)
 			).resolves.toMatchObject({ enabled: true });
@@ -251,15 +251,15 @@ describe("public flags HTTP integration", () => {
 				createdBy: user.id,
 				defaultValue: true,
 				key: "personal-c",
-				userId: "customer-2",
+				userId: user.id,
 				websiteId: website.id,
 			});
 
 			const response = await get(
-				`/v1/flags/bulk?clientId=${website.id}&userId=customer-2&keys=global-a,personal-c,missing`
+				`/v1/flags/bulk?clientId=${website.id}&userId=${user.id}&keys=global-a,personal-c,missing`
 			);
 			expect(response.status).toBe(200);
-			expect(response.headers.get("cache-control")).toContain("public");
+			expect(response.headers.get("cache-control")).toBe("private, no-store");
 			const body = await json(response);
 
 			expect(body.count).toBe(2);
@@ -269,6 +269,40 @@ describe("public flags HTTP integration", () => {
 			]);
 			expect(body.flags["global-a"]).toMatchObject({ enabled: true });
 			expect(body.flags["personal-c"]).toMatchObject({ enabled: true });
+
+			const omittedGet = await json(
+				await get(`/v1/flags/bulk?clientId=${website.id}&userId=${user.id}`)
+			);
+			const omittedPost = await json(
+				await post("/v1/flags/bulk", {
+					clientId: website.id,
+					userId: user.id,
+				})
+			);
+			for (const result of [omittedGet, omittedPost]) {
+				expect(result.count).toBe(3);
+				expect(Object.keys(result.flags).sort()).toEqual([
+					"global-a",
+					"global-b",
+					"personal-c",
+				]);
+			}
+
+			const emptyGet = await json(
+				await get(
+					`/v1/flags/bulk?clientId=${website.id}&userId=${user.id}&keys=`
+				)
+			);
+			const emptyPost = await json(
+				await post("/v1/flags/bulk", {
+					clientId: website.id,
+					keys: [],
+					userId: user.id,
+				})
+			);
+			for (const result of [emptyGet, emptyPost]) {
+				expect(result).toEqual({ count: 0, flags: {} });
+			}
 		});
 
 		iit("returns safe defaults for missing params and malformed properties", async () => {
@@ -461,7 +495,7 @@ describe("public flags HTTP integration", () => {
 						{ "x-api-key": keyA.secret }
 					)
 				).status
-			).toBe(403);
+			).toBe(404);
 		});
 
 		iit("requires user-associated API keys for writes", async () => {
@@ -485,7 +519,7 @@ describe("public flags HTTP integration", () => {
 
 			expect(response.status).toBe(403);
 			expect(await json(response)).toEqual({
-				error: "API key must be associated with a user",
+				error: "Forbidden",
 			});
 		});
 	});

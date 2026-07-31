@@ -16,6 +16,7 @@ const footerSections = [
 		title: "Product",
 		items: [
 			{ href: "/docs", label: "Docs", navItem: "docs" },
+			{ href: "/developers", label: "Developers", navItem: "developers" },
 			{ href: "/pricing", label: "Pricing", navItem: "pricing" },
 			{
 				href: "/calculator",
@@ -30,7 +31,9 @@ const footerSections = [
 		title: "Company",
 		items: [
 			{ href: "/blog", label: "Blog", navItem: "blog" },
+			{ href: "/about", label: "About", navItem: "about" },
 			{ href: "/manifesto", label: "Manifesto", navItem: "manifesto" },
+			{ href: "/careers", label: "Careers", navItem: "careers" },
 			{ href: "/contact", label: "Contact", navItem: "contact" },
 			{
 				external: true,
@@ -53,7 +56,7 @@ function FooterHero() {
 	return (
 		<div
 			className="relative flex h-70 w-full items-start overflow-hidden rounded-lg bg-center bg-cover md:h-80"
-			style={{ backgroundImage: "url('/brand/gradients/cta-bg.png')" }}
+			style={{ backgroundImage: "url('/brand/gradients/cta-bg.webp')" }}
 		>
 			<div className="absolute inset-0 bg-black/40" />
 			<Image
@@ -215,14 +218,14 @@ function ComplianceLinks() {
 					<Link
 						aria-label="CCPA Compliance"
 						className="text-foreground transition-colors hover:text-muted-foreground"
-						href="/"
+						href="/privacy"
 					>
 						<CCPAIcon className="size-9" />
 					</Link>
 					<Link
 						aria-label="GDPR Compliance"
 						className="text-foreground transition-colors hover:text-muted-foreground"
-						href="/"
+						href="/dpa"
 					>
 						<GDPRIcon className="size-11" />
 					</Link>

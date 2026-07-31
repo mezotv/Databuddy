@@ -54,7 +54,6 @@ export default function RootLayout({ children }) {
 <script
   src="https://cdn.databuddy.cc/databuddy.js"
   data-client-id="your-client-id"
-  data-track-performance
   data-track-web-vitals
   data-track-errors
   async
@@ -132,8 +131,7 @@ Requires \`trackAttributes: true\`:
 |--------|------|---------|-------------|
 | \`clientId\` | \`string\` | Auto-detect | Project client ID |
 | \`disabled\` | \`boolean\` | \`false\` | Disable all tracking |
-| \`trackPerformance\` | \`boolean\` | \`true\` | Page load timing |
-| \`trackWebVitals\` | \`boolean\` | \`false\` | Core Web Vitals (LCP, FID, CLS) |
+| \`trackWebVitals\` | \`boolean\` | \`false\` | Core Web Vitals (LCP, INP, CLS) |
 | \`trackErrors\` | \`boolean\` | \`false\` | JavaScript error tracking |
 | \`trackInteractions\` | \`boolean\` | \`false\` | User interactions |
 | \`trackOutgoingLinks\` | \`boolean\` | \`false\` | External link clicks |
@@ -208,6 +206,10 @@ Accepts single event or array (max 100). Max payload: 1MB single, 5MB batch.
 |----------|-----|
 | Dashboard | https://app.databuddy.cc |
 | API | https://api.databuddy.cc |
+| OpenAPI spec | https://www.databuddy.cc/openapi.json |
+| API reference | https://api.databuddy.cc/ |
+| MCP server | https://api.databuddy.cc/v1/mcp/ |
+| MCP manifest | https://www.databuddy.cc/.well-known/mcp.json |
 | Event ingestion | https://basket.databuddy.cc |
 | CDN script | https://cdn.databuddy.cc/databuddy.js |
 | Docs | https://www.databuddy.cc/docs |

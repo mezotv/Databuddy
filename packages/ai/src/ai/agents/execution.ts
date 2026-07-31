@@ -1,10 +1,8 @@
 import type { ApiKeyRow } from "@databuddy/api-keys/resolve";
 import { MIN_AGENT_CREDIT_CHECK_BALANCE } from "@databuddy/shared/agent-credits";
 import { getAutumn } from "@databuddy/rpc/autumn";
-import {
-	getBillingCustomerId,
-	getOrganizationOwnerId,
-} from "@databuddy/rpc/billing";
+import { getBillingCustomerId } from "@databuddy/rpc/billing";
+import { getOrganizationOwnerId } from "@databuddy/rpc/organization";
 import type { LanguageModelUsage } from "ai";
 import { trackAgentEvent } from "../../lib/databuddy";
 import { captureError, mergeWideEvent } from "../../lib/tracing";
@@ -17,6 +15,7 @@ interface AgentUsageTrackingInput {
 	agentType?: string;
 	billingCustomerId?: string | null;
 	chatId?: string;
+	idempotencyKey?: string;
 	modelId: string;
 	organizationId?: string | null;
 	source: "dashboard" | "mcp" | "slack" | "insights";
@@ -25,11 +24,25 @@ interface AgentUsageTrackingInput {
 	websiteId?: string;
 }
 
+export function isAgentBillingConfigured(): boolean {
+	return Boolean(process.env.AUTUMN_SECRET_KEY?.trim());
+}
+
 export async function resolveAgentBillingCustomerId(principal: {
 	apiKey?: ApiKeyRow | null;
 	organizationId?: string | null;
 	userId?: string | null;
 }): Promise<string | null> {
+	if (!isAgentBillingConfigured()) {
+		mergeAgentBillingFields({
+			billingCustomerId: null,
+			organizationId:
+				principal.organizationId ?? principal.apiKey?.organizationId ?? null,
+			resolution: "billing_disabled",
+		});
+		return null;
+	}
+
 	const apiKeyOrganizationId = principal.apiKey?.organizationId ?? null;
 	const organizationId = principal.organizationId ?? apiKeyOrganizationId;
 	if (apiKeyOrganizationId) {
@@ -72,7 +85,7 @@ export async function resolveAgentBillingCustomerId(principal: {
 export async function ensureAgentCreditsAvailable(
 	billingCustomerId: string | null
 ): Promise<boolean> {
-	if (!billingCustomerId) {
+	if (!(isAgentBillingConfigured() && billingCustomerId)) {
 		mergeWideEvent({
 			agent_credits_allowed: true,
 			agent_credits_check_skipped: true,
@@ -152,7 +165,7 @@ export async function trackAgentUsageAndBill(
 		...summary,
 	});
 
-	if (!input.billingCustomerId) {
+	if (!(isAgentBillingConfigured() && input.billingCustomerId)) {
 		return summary;
 	}
 
@@ -172,22 +185,26 @@ export async function trackAgentUsageAndBill(
 		return summary;
 	}
 
-	await autumn
-		.track({
-			customerId: billingCustomerId,
-			featureId: "agent_credits",
-			value: creditsUsed,
-			properties: {
-				agent_source: input.source,
-				cost_model_id: summary.cost_model_id,
-				model_id: input.modelId,
-				input_tokens: summary.input_tokens,
-				output_tokens: summary.output_tokens,
-				cache_read_tokens: summary.cache_read_tokens,
-				cache_write_tokens: summary.cache_write_tokens,
-			},
-		})
-		.catch((err) => captureError(err, billingErrorContext));
+	const request = {
+		customerId: billingCustomerId,
+		featureId: "agent_credits",
+		value: creditsUsed,
+		properties: {
+			agent_source: input.source,
+			cost_model_id: summary.cost_model_id,
+			model_id: input.modelId,
+			input_tokens: summary.input_tokens,
+			output_tokens: summary.output_tokens,
+			cache_read_tokens: summary.cache_read_tokens,
+			cache_write_tokens: summary.cache_write_tokens,
+		},
+	};
+	const tracked = input.idempotencyKey
+		? autumn.track(request, {
+				headers: { "Idempotency-Key": input.idempotencyKey },
+			})
+		: autumn.track(request);
+	await tracked.catch((err) => captureError(err, billingErrorContext));
 
 	return summary;
 }

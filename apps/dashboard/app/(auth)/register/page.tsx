@@ -1,21 +1,28 @@
 "use client";
 
 import { authClient } from "@databuddy/auth/client";
-import { track } from "@databuddy/sdk";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { parseAsString, useQueryState } from "nuqs";
 import { Suspense, useState } from "react";
 import { toast } from "sonner";
+import { trackOpenAiRegistrationCompleted } from "@/components/openai-ads-pixel";
 import { GithubMark, GoogleMark } from "@/components/ui/brand-icons";
 import VisuallyHidden from "@/components/ui/visuallyhidden";
+import {
+	APP_EVENTS,
+	readMarketingProperties,
+	storePendingSocialSignup,
+	type SignupEventProperties,
+	type SignupMethod,
+	trackAppEvent,
+} from "@/lib/app-events";
+import { safeCallbackPath } from "@/lib/safe-callback";
 import {
 	CaretLeftIcon,
 	EyeIcon,
 	EyeSlashIcon,
 	InfoIcon,
 } from "@databuddy/ui/icons";
-import { Checkbox } from "@databuddy/ui/client";
 import {
 	Button,
 	Divider,
@@ -27,12 +34,12 @@ import {
 } from "@databuddy/ui";
 
 function RegisterPageContent() {
-	const router = useRouter();
 	const [selectedPlan] = useQueryState("plan", parseAsString);
 	const [callback] = useQueryState(
 		"callback",
 		parseAsString.withDefault("/websites")
 	);
+	const safeCallback = safeCallbackPath(callback);
 	const [isLoading, setIsLoading] = useState(false);
 	const [formData, setFormData] = useState({
 		name: "",
@@ -40,12 +47,11 @@ function RegisterPageContent() {
 		password: "",
 		confirmPassword: "",
 	});
-	const [acceptTerms, setAcceptTerms] = useState(false);
 	const [isHoneypot, setIsHoneypot] = useState(false);
 	const [showPassword, setShowPassword] = useState(false);
 	const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 	const [registrationStep, setRegistrationStep] = useState<
-		"form" | "success" | "verification-needed"
+		"form" | "verification-needed"
 	>("form");
 
 	const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -53,18 +59,21 @@ function RegisterPageContent() {
 		setFormData((prev) => ({ ...prev, [name]: value }));
 	};
 
-	const trackSignUp = (
-		method: "email" | "social",
-		provider?: "github" | "google"
+	const getSignupProperties = (
+		method: SignupMethod
+	): SignupEventProperties => ({
+		...readMarketingProperties(new URLSearchParams(window.location.search)),
+		method,
+		plan: selectedPlan || undefined,
+	});
+
+	const trackSignup = (
+		eventName:
+			| typeof APP_EVENTS.signupCompleted
+			| typeof APP_EVENTS.signupStarted,
+		properties: SignupEventProperties
 	) => {
-		try {
-			track("signup_completed", {
-				method: method === "social" ? `${method}_${provider}` : method,
-				plan: selectedPlan || undefined,
-			});
-		} catch (error) {
-			console.error("Failed to track sign up event:", error);
-		}
+		trackAppEvent(eventName, properties, { flush: true });
 	};
 
 	const getCallbackUrl = () => {
@@ -72,7 +81,7 @@ function RegisterPageContent() {
 			localStorage.setItem("pendingPlanSelection", selectedPlan);
 			return `/billing/plans?plan=${selectedPlan}`;
 		}
-		return callback;
+		return safeCallback;
 	};
 
 	const getProviderLabel = (provider: "github" | "google") =>
@@ -86,17 +95,14 @@ function RegisterPageContent() {
 			return;
 		}
 
-		if (!acceptTerms) {
-			toast.error("You must accept the terms and conditions");
-			return;
-		}
-
 		if (isHoneypot) {
 			toast.error("Server error, please try again later");
 			return;
 		}
 
 		setIsLoading(true);
+		const signupProperties = getSignupProperties("email");
+		trackSignup(APP_EVENTS.signupStarted, signupProperties);
 
 		const { error } = await authClient.signUp.email({
 			email: formData.email,
@@ -105,14 +111,12 @@ function RegisterPageContent() {
 			callbackURL: getCallbackUrl(),
 			fetchOptions: {
 				onSuccess: () => {
-					trackSignUp("email");
+					trackSignup(APP_EVENTS.signupCompleted, signupProperties);
+					trackOpenAiRegistrationCompleted();
 					toast.success(
 						"Account created! Please check your email to verify your account."
 					);
 					setRegistrationStep("verification-needed");
-					if (selectedPlan) {
-						localStorage.setItem("pendingPlanSelection", selectedPlan);
-					}
 				},
 			},
 		});
@@ -127,32 +131,38 @@ function RegisterPageContent() {
 	const resendVerificationEmail = async () => {
 		setIsLoading(true);
 
-		await authClient.sendVerificationEmail({
-			email: formData.email,
-			callbackURL: "/onboarding",
-			fetchOptions: {
-				onSuccess: () => {
-					toast.success("Verification email sent!");
-				},
-				onError: () => {
-					toast.error(
-						"Failed to send verification email. Please try again later."
-					);
-				},
-			},
-		});
-
+		try {
+			const { error } = await authClient.sendVerificationEmail({
+				email: formData.email,
+				callbackURL: getCallbackUrl(),
+			});
+			if (error) {
+				toast.error(
+					"We couldn't send the verification email. Try again in a moment."
+				);
+			} else {
+				toast.success("Verification email sent. Check your inbox.");
+			}
+		} catch {
+			toast.error(
+				"We couldn't send the verification email. Try again in a moment."
+			);
+		}
 		setIsLoading(false);
 	};
 
 	const handleSocialLogin = async (provider: "github" | "google") => {
 		setIsLoading(true);
+		const signupProperties = getSignupProperties(`social_${provider}`);
+		const callbackURL = getCallbackUrl();
+		trackSignup(APP_EVENTS.signupStarted, signupProperties);
 
 		try {
 			const result = await authClient.signIn.social({
 				provider,
-				callbackURL: getCallbackUrl(),
-				newUserCallbackURL: "/onboarding",
+				callbackURL,
+				newUserCallbackURL:
+					callbackURL === "/websites" ? "/onboarding" : callbackURL,
 				disableRedirect: true,
 			});
 
@@ -165,9 +175,8 @@ function RegisterPageContent() {
 				return;
 			}
 
-			trackSignUp("social", provider);
-
 			if (result.data?.url) {
+				storePendingSocialSignup(signupProperties);
 				window.location.href = result.data.url;
 				return;
 			}
@@ -197,18 +206,6 @@ function RegisterPageContent() {
 							</span>{" "}
 							and click the verification link to activate your account. If you
 							don't see the email, check your spam folder.
-						</Text>
-					</>
-				);
-			case "success":
-				return (
-					<>
-						<Text as="h1" className="text-balance font-medium text-2xl">
-							Success!
-						</Text>
-						<Text tone="muted">
-							Your account has been created successfully. You can now sign in to
-							access your dashboard.
 						</Text>
 					</>
 				);
@@ -247,13 +244,6 @@ function RegisterPageContent() {
 				<span className="sm:hidden">Back</span>
 			</Button>
 		</div>
-	);
-
-	const renderSuccessContent = () => (
-		<Button className="w-full" onClick={() => router.push("/login")} size="lg">
-			<span className="hidden sm:inline">Continue to login</span>
-			<span className="sm:hidden">Continue</span>
-		</Button>
 	);
 
 	const renderFormContent = () => (
@@ -411,57 +401,6 @@ function RegisterPageContent() {
 					/>
 				</VisuallyHidden>
 
-				<div className="flex items-center gap-2">
-					<Checkbox
-						checked={acceptTerms}
-						className="cursor-pointer data-[state=checked]:border-brand-purple/50 data-[state=checked]:bg-brand-purple data-[state=unchecked]:bg-input"
-						disabled={isLoading}
-						id="terms"
-						onCheckedChange={(checked) => setAcceptTerms(checked as boolean)}
-					/>
-					<Field.Label
-						className="text-[11px] text-muted-foreground leading-relaxed"
-						htmlFor="terms"
-					>
-						<span className="hidden sm:inline">
-							I agree to the{" "}
-							<Link
-								className="font-medium text-accent-foreground duration-200 hover:text-accent-foreground/80"
-								href="https://www.databuddy.cc/terms"
-								target="_blank"
-							>
-								Terms of Service
-							</Link>{" "}
-							and{" "}
-							<Link
-								className="font-medium text-accent-foreground duration-200 hover:text-accent-foreground/80"
-								href="https://www.databuddy.cc/privacy"
-								target="_blank"
-							>
-								Privacy Policy
-							</Link>
-						</span>
-						<span className="sm:hidden">
-							I agree to{" "}
-							<Link
-								className="font-medium text-primary hover:text-primary/80"
-								href="https://www.databuddy.cc/terms"
-								target="_blank"
-							>
-								Terms
-							</Link>{" "}
-							&{" "}
-							<Link
-								className="font-medium text-primary hover:text-primary/80"
-								href="https://www.databuddy.cc/privacy"
-								target="_blank"
-							>
-								Privacy
-							</Link>
-						</span>
-					</Field.Label>
-				</div>
-
 				<Button
 					className="mt-4 w-full"
 					loading={isLoading}
@@ -471,6 +410,29 @@ function RegisterPageContent() {
 					<span className="hidden sm:inline">Create account</span>
 					<span className="sm:hidden">Sign up</span>
 				</Button>
+
+				<Text
+					className="mx-auto max-w-xs text-center text-[11px] leading-relaxed"
+					tone="muted"
+				>
+					By creating an account, you agree to the{" "}
+					<Link
+						className="font-medium text-accent-foreground duration-200 hover:text-accent-foreground/80"
+						href="https://www.databuddy.cc/terms"
+						target="_blank"
+					>
+						Terms
+					</Link>{" "}
+					and{" "}
+					<Link
+						className="font-medium text-accent-foreground duration-200 hover:text-accent-foreground/80"
+						href="https://www.databuddy.cc/privacy"
+						target="_blank"
+					>
+						Privacy Policy
+					</Link>
+					.
+				</Text>
 			</form>
 		</div>
 	);
@@ -479,8 +441,6 @@ function RegisterPageContent() {
 		switch (registrationStep) {
 			case "verification-needed":
 				return renderVerificationContent();
-			case "success":
-				return renderSuccessContent();
 			default:
 				return renderFormContent();
 		}
@@ -496,11 +456,7 @@ function RegisterPageContent() {
 						Already have an account?{" "}
 						<Link
 							className="font-medium text-accent-foreground duration-200 hover:text-accent-foreground/60"
-							href={
-								callback
-									? `/login?callback=${encodeURIComponent(callback)}`
-									: "/login"
-							}
+							href={`/login?callback=${encodeURIComponent(safeCallback)}`}
 						>
 							Sign in
 						</Link>

@@ -1,23 +1,36 @@
 "use client";
 
-import { getCountryCode } from "@databuddy/shared/country-codes";
+import {
+	formatCountryName,
+	getCountryCode,
+} from "@databuddy/shared/country-codes";
 import type { ProfileSession, Session } from "@/types/sessions";
 import { notFound, useParams, useRouter } from "next/navigation";
 import { type ElementType, type ReactNode, useCallback, useState } from "react";
 import { BrowserIcon, CountryFlag, OSIcon } from "@/components/icon";
 import { useDateFilters } from "@/hooks/use-date-filters";
 import { getDeviceIcon } from "@/components/device-icon";
+import { useProfileHistory, useProfileIdentity } from "@/hooks/use-profiles";
 import { cn } from "@/lib/utils";
+import { formatCurrency } from "@/lib/formatters";
 import { generateProfileName } from "./_components/generate-profile-name";
 import { SessionRow } from "./_components/session-row";
-import { useUserProfile } from "./use-user-profile";
+import {
+	type ProfileTransaction,
+	useProfileRevenue,
+	useUserProfile,
+} from "./use-user-profile";
 import {
 	ArrowLeftIcon,
 	ChartLineIcon,
+	ClockCounterClockwiseIcon,
 	ClockIcon,
+	CoinsIcon,
 	DevicesIcon,
 	GaugeIcon,
 	GlobeIcon,
+	LockSimpleIcon,
+	TagIcon,
 	UserIcon,
 } from "@databuddy/ui/icons";
 import {
@@ -25,6 +38,7 @@ import {
 	EmptyState,
 	Spinner,
 	StatusDot,
+	Tooltip,
 	formatDateOnly,
 	formatLocalTime,
 } from "@databuddy/ui";
@@ -316,9 +330,165 @@ function WebVitalsSection({
 	);
 }
 
+function formatTraitValue(value: unknown): string {
+	if (value === null || value === undefined) {
+		return "—";
+	}
+	if (typeof value === "boolean") {
+		return value ? "Yes" : "No";
+	}
+	if (typeof value === "object") {
+		return JSON.stringify(value);
+	}
+	return String(value);
+}
+
+function TraitsSection({
+	className,
+	traits,
+}: {
+	className?: string;
+	traits: Record<string, unknown> | undefined;
+}) {
+	const entries = Object.entries(traits ?? {}).sort(([a], [b]) =>
+		a.localeCompare(b)
+	);
+	if (entries.length === 0) {
+		return null;
+	}
+
+	return (
+		<SidebarSection className={className} icon={TagIcon} title="Traits">
+			{entries.map(([key, value]) => (
+				<div
+					className="flex min-h-10 items-center justify-between gap-3 py-2.5"
+					key={key}
+				>
+					<span className="shrink-0 text-muted-foreground text-xs">{key}</span>
+					<span className="min-w-0 truncate text-right font-medium text-foreground text-sm">
+						{formatTraitValue(value)}
+					</span>
+				</div>
+			))}
+		</SidebarSection>
+	);
+}
+
+function transactionDotColor(tx: ProfileTransaction) {
+	if (tx.type === "refund") {
+		return "destructive" as const;
+	}
+	return tx.status === "completed" ? ("success" as const) : ("muted" as const);
+}
+
+function RevenueSection({
+	className,
+	transactions,
+}: {
+	className?: string;
+	transactions: ProfileTransaction[];
+}) {
+	if (transactions.length === 0) {
+		return null;
+	}
+
+	const totals = new Map<string, number>();
+	for (const tx of transactions) {
+		if (tx.type === "refund" || tx.status === "completed") {
+			totals.set(tx.currency, (totals.get(tx.currency) ?? 0) + tx.amount);
+		}
+	}
+
+	return (
+		<SidebarSection className={className} icon={CoinsIcon} title="Revenue">
+			{[...totals.entries()].map(([currency, total]) => (
+				<div
+					className="flex min-h-10 items-center justify-between gap-3 py-2.5"
+					key={currency}
+				>
+					<span className="text-muted-foreground text-xs">
+						Total {totals.size > 1 ? currency : ""}
+					</span>
+					<span className="font-semibold text-foreground text-sm tabular-nums">
+						{formatCurrency(total, currency)}
+					</span>
+				</div>
+			))}
+			{transactions.slice(0, 5).map((tx) => (
+				<DetailRow
+					indicator={<StatusDot color={transactionDotColor(tx)} size="md" />}
+					key={tx.transaction_id}
+					label={`${formatDateOnly(tx.created)} · ${tx.type}`}
+					subValue={tx.product_name || undefined}
+					value={formatCurrency(tx.amount, tx.currency)}
+				/>
+			))}
+		</SidebarSection>
+	);
+}
+
+interface TraitHistoryEntry {
+	changes: Record<string, { old: unknown; new: unknown }>;
+	createdAt: string | Date;
+	source: string;
+}
+
+function TraitHistorySection({
+	className,
+	history,
+}: {
+	className?: string;
+	history: TraitHistoryEntry[];
+}) {
+	if (history.length === 0) {
+		return null;
+	}
+
+	return (
+		<SidebarSection
+			className={className}
+			icon={ClockCounterClockwiseIcon}
+			title="Trait history"
+		>
+			<div className="flex flex-col gap-3">
+				{history.map((entry, index) => (
+					<div
+						className="border-border/60 border-l-2 pl-3"
+						key={`${entry.createdAt}-${index}`}
+					>
+						<div className="flex items-center justify-between gap-2">
+							<span className="text-muted-foreground text-xs">
+								{formatDateOnly(entry.createdAt)} ·{" "}
+								{formatLocalTime(entry.createdAt, "h:mm A")}
+							</span>
+							<span className="text-muted-foreground/60 text-xs">
+								{entry.source}
+							</span>
+						</div>
+						<div className="mt-1 flex flex-col gap-0.5">
+							{Object.entries(entry.changes).map(([key, change]) => (
+								<p className="text-sm" key={key}>
+									<span className="font-medium text-foreground">{key}</span>{" "}
+									<span className="text-muted-foreground/70 line-through">
+										{formatTraitValue(change.old)}
+									</span>{" "}
+									<span className="text-foreground">
+										→ {formatTraitValue(change.new)}
+									</span>
+								</p>
+							))}
+						</div>
+					</div>
+				))}
+			</div>
+		</SidebarSection>
+	);
+}
+
 function Header({
 	onBack,
 	userProfile,
+	identity,
 }: {
 	onBack: () => void;
 	userProfile?: {
@@ -327,10 +497,12 @@ function Header({
 		region?: string;
 		total_sessions: number;
 	};
+	identity?: { displayName: string | null; email: string | null } | null;
 }) {
 	const countryCode = userProfile
 		? getCountryCode(userProfile.country || "")
 		: "";
+	const countryName = formatCountryName(userProfile?.country);
 	const isReturning = (userProfile?.total_sessions ?? 0) > 1;
 
 	return (
@@ -349,14 +521,31 @@ function Header({
 					<div className="flex items-center gap-2.5">
 						<CountryFlag country={countryCode} size="sm" />
 						<div>
-							<h1 className="font-medium text-foreground text-sm">
-								{generateProfileName(userProfile.visitor_id)}
-							</h1>
+							<div className="flex items-center gap-1.5">
+								<h1 className="font-medium text-foreground text-sm">
+									{identity?.displayName ||
+										identity?.email ||
+										generateProfileName(userProfile.visitor_id)}
+								</h1>
+								{identity?.displayName || identity?.email ? (
+									<Tooltip
+										content="Name and email are encrypted at rest"
+										side="bottom"
+									>
+										<span className="flex items-center text-muted-foreground">
+											<LockSimpleIcon className="size-3" weight="duotone" />
+										</span>
+									</Tooltip>
+								) : null}
+							</div>
 							<p className="text-muted-foreground text-xs">
+								{identity?.displayName && identity?.email
+									? `${identity.email} · `
+									: ""}
 								{userProfile.region && userProfile.region !== "Unknown"
 									? `${userProfile.region}, `
 									: ""}
-								{userProfile.country || "Unknown location"}
+								{countryName || "Unknown location"}
 							</p>
 						</div>
 					</div>
@@ -395,6 +584,15 @@ export default function UserDetailPage() {
 		userId,
 		dateRange
 	);
+	const { data: identity } = useProfileIdentity(
+		websiteId,
+		userProfile?.profile_id ?? ""
+	);
+	const { data: traitHistory } = useProfileHistory(
+		websiteId,
+		userProfile?.profile_id ?? ""
+	);
+	const { transactions } = useProfileRevenue(websiteId, userId, dateRange);
 
 	const handleToggleSession = useCallback((sessionId: string) => {
 		setExpandedSessions((prev) => {
@@ -456,6 +654,7 @@ export default function UserDetailPage() {
 		userProfile.region && userProfile.region !== "Unknown"
 			? userProfile.region
 			: undefined;
+	const countryName = formatCountryName(userProfile.country) || "Unknown";
 	const metrics = [
 		{ label: "Sessions", value: totalSessions },
 		{ label: "Pageviews", value: userProfile.total_pageviews ?? 0 },
@@ -466,7 +665,11 @@ export default function UserDetailPage() {
 
 	return (
 		<div className="flex h-full flex-col">
-			<Header onBack={handleBack} userProfile={userProfile} />
+			<Header
+				identity={identity}
+				onBack={handleBack}
+				userProfile={userProfile}
+			/>
 
 			<div className="flex min-h-0 flex-1 overflow-hidden">
 				<aside className="hidden w-80 shrink-0 overflow-y-auto border-r bg-sidebar lg:block">
@@ -480,6 +683,10 @@ export default function UserDetailPage() {
 						))}
 					</div>
 
+					<TraitsSection traits={identity?.traits} />
+
+					<RevenueSection transactions={transactions} />
+
 					<WebVitalsSection vitals={webVitals} />
 
 					<SidebarSection icon={GlobeIcon} title="Location">
@@ -492,7 +699,7 @@ export default function UserDetailPage() {
 							}
 							label="Country"
 							subValue={region}
-							value={userProfile.country || "Unknown"}
+							value={countryName}
 						/>
 					</SidebarSection>
 
@@ -556,6 +763,8 @@ export default function UserDetailPage() {
 							value={userProfile.total_duration_formatted || "0s"}
 						/>
 					</SidebarSection>
+
+					<TraitHistorySection history={traitHistory ?? []} />
 				</aside>
 
 				<main className="min-w-0 flex-1 overflow-y-auto">
@@ -570,9 +779,24 @@ export default function UserDetailPage() {
 						))}
 					</div>
 
+					<TraitsSection
+						className="bg-background lg:hidden"
+						traits={identity?.traits}
+					/>
+
+					<RevenueSection
+						className="bg-background lg:hidden"
+						transactions={transactions}
+					/>
+
 					<WebVitalsSection
 						className="bg-background lg:hidden"
 						vitals={webVitals}
+					/>
+
+					<TraitHistorySection
+						className="bg-background lg:hidden"
+						history={traitHistory ?? []}
 					/>
 
 					<div className="sticky top-0 z-10 grid h-[39px] grid-cols-[24px_1fr_120px_80px_60px_60px_70px_80px] items-center gap-2 border-b bg-accent px-3 font-medium text-muted-foreground text-xs shadow-[0_0_0_0.5px_var(--border)] lg:grid-cols-[24px_1fr_120px_80px_100px_60px_60px_70px_80px]">

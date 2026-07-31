@@ -21,12 +21,15 @@ import {
 	rethrowOrWrap,
 } from "@lib/structured-errors";
 import { record } from "@lib/tracing";
-import { extractTrustedClientIp } from "@utils/ip-geo";
+import {
+	extractTrustedClientIp,
+	getVisitorCountryForAutoMode,
+} from "@utils/ip-geo";
 import { isValidIpFromSettings } from "@utils/origin-ip-validation";
 import { VALIDATION_LIMITS, validatePayloadSize } from "@utils/validation";
 import { Elysia } from "elysia";
 import { useLogger } from "evlog/elysia";
-import { trackEventSchema } from "./track-event-schema";
+import { type TrackEventPayload, trackEventSchema } from "./track-event-schema";
 
 interface ResolvedAuth {
 	apiKey?: ApiKeyRow;
@@ -241,12 +244,16 @@ export const trackRoute = new Elysia().post(
 				throw createIngestSchemaValidationError(parseResult.error.issues);
 			}
 
-			const events = Array.isArray(parseResult.data)
+			const events: TrackEventPayload[] = Array.isArray(parseResult.data)
 				? parseResult.data
 				: [parseResult.data];
 			const websiteIdParam = typedQuery.website_id || events[0]?.websiteId;
 
 			const auth = await resolveAuth(request.headers, request, websiteIdParam);
+			const targets = events.map((event) => ({
+				event,
+				websiteId: event.websiteId ?? typedQuery.website_id ?? auth.websiteId,
+			}));
 
 			log.set({
 				ownerId: auth.ownerId,
@@ -266,28 +273,20 @@ export const trackRoute = new Elysia().post(
 				throw basketErrors.trackRateLimited();
 			}
 
-			const billingUserId = auth.organizationId
-				? await resolveApiKeyOwnerId(auth.organizationId)
-				: auth.ownerId;
-
-			if (billingUserId) {
-				await checkAutumnUsage(
-					billingUserId,
-					"events",
-					{ api_route: "track", batch_size: events.length },
-					events.length
-				);
-			}
-
 			const allowedApiKeyWebsiteIds =
 				auth.apiKey && !hasGlobalAccess(auth.apiKey)
 					? new Set(getAccessibleWebsiteIds(auth.apiKey))
 					: null;
 
-			for (const event of events) {
-				const targetId = event.websiteId ?? auth.websiteId;
+			for (const target of targets) {
+				const targetId = target.websiteId;
 
 				if (auth.apiKey) {
+					if (allowedApiKeyWebsiteIds && !targetId) {
+						log.set({ rejected: "website_scope" });
+						captureRejectedBody();
+						throw basketErrors.trackWebsiteScopeMismatch();
+					}
 					if (
 						targetId &&
 						allowedApiKeyWebsiteIds &&
@@ -312,20 +311,79 @@ export const trackRoute = new Elysia().post(
 				}
 			}
 
+			if (auth.apiKey) {
+				const targetIds = [
+					...new Set(
+						targets.flatMap((target) =>
+							target.websiteId ? [target.websiteId] : []
+						)
+					),
+				];
+				const websites = await Promise.all(
+					targetIds.map((id) => getWebsiteByIdV2(id))
+				);
+				for (const [i, website] of websites.entries()) {
+					if (!website) {
+						log.set({
+							rejected: "website_not_found",
+							targetWebsiteId: targetIds[i],
+						});
+						captureRejectedBody();
+						throw basketErrors.trackWebsiteNotFound();
+					}
+					if (
+						!auth.organizationId ||
+						website.organizationId !== auth.organizationId
+					) {
+						log.set({
+							rejected: "website_scope",
+							targetWebsiteId: targetIds[i],
+						});
+						captureRejectedBody();
+						throw basketErrors.trackWebsiteScopeMismatch();
+					}
+					if (website.status !== "ACTIVE") {
+						log.set({
+							rejected: "website_not_active",
+							targetWebsiteId: targetIds[i],
+						});
+						captureRejectedBody();
+						throw basketErrors.trackWebsiteNotFound();
+					}
+				}
+			}
+
+			const billingUserId = auth.organizationId
+				? await resolveApiKeyOwnerId(auth.organizationId)
+				: auth.ownerId;
+
+			if (billingUserId) {
+				await checkAutumnUsage(
+					billingUserId,
+					"events",
+					{ api_route: "track", batch_size: events.length },
+					events.length
+				);
+			}
+
 			const now = Date.now();
-			const spans = events.map((event) => ({
+			const spans = targets.map(({ event, websiteId }) => ({
 				owner_id: auth.ownerId,
-				website_id: event.websiteId ?? auth.websiteId,
+				website_id: websiteId,
 				timestamp: parseTimestamp(event.timestamp, now),
 				event_name: event.name,
 				namespace: event.namespace,
+				path: event.path,
 				properties: event.properties,
 				anonymous_id: event.anonymousId,
+				anonymizeVisitorIds: event.anonymizeVisitorIds,
+				profile_id: event.profileId,
 				session_id: event.sessionId,
 				source: event.source,
 			}));
 
-			await insertCustomEvents(spans);
+			const visitorCountry = await getVisitorCountryForAutoMode(spans, request);
+			await insertCustomEvents(spans, visitorCountry);
 
 			return json(
 				{ status: "success", type: "custom_event", count: spans.length },

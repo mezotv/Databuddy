@@ -4,6 +4,12 @@ import type { SimpleQueryConfig } from "../types";
 
 export const ErrorsBuilders: Record<string, SimpleQueryConfig> = {
 	recent_errors: {
+		meta: {
+			description:
+				"Recent JS errors with full context: message, stack (capped at 1500 chars), path, error_type, browser, OS, device, country. For aggregates use error_summary / errors_by_type / errors_by_page.",
+			category: "Errors",
+			tags: ["errors", "recent", "debugging"],
+		},
 		customSql: (ctx) => {
 			const { websiteId, startDate, endDate, filterConditions, filterParams } =
 				ctx;
@@ -84,6 +90,12 @@ export const ErrorsBuilders: Record<string, SimpleQueryConfig> = {
 	},
 
 	error_types: {
+		meta: {
+			description:
+				"Top error MESSAGES with count, affected users, and last_seen. Group key is the message string. For grouping by JS class (TypeError, ReferenceError, …) use errors_by_type.",
+			category: "Errors",
+			tags: ["errors", "messages", "triage"],
+		},
 		table: Analytics.error_spans,
 		fields: [
 			"message as name",
@@ -100,7 +112,87 @@ export const ErrorsBuilders: Record<string, SimpleQueryConfig> = {
 		customizable: true,
 	},
 
+	error_fingerprints: {
+		meta: {
+			description:
+				"Exact error messages ranked by affected users and sessions, with one representative debugging context per message.",
+			category: "Errors",
+			tags: ["errors", "fingerprints", "debugging", "internal"],
+		},
+		customSql: (ctx) => {
+			const { websiteId, startDate, endDate, filterConditions, filterParams } =
+				ctx;
+			const requestedLimit = ctx.limit ?? 20;
+			const limit = Math.min(
+				Math.max(
+					Number.isFinite(requestedLimit) ? Math.trunc(requestedLimit) : 20,
+					1
+				),
+				50
+			);
+			const filterClause = appendFilterClause(filterConditions);
+			const representativeRank =
+				"tuple(if(ifNull(es.stack, '') != '', 1, 0), es.timestamp, es.session_id, es.anonymous_id)";
+			const normalizedPath =
+				"if(es.path = '', '', if(trimRight(path(es.path), '/') = '', '/', trimRight(path(es.path), '/')))";
+
+			return {
+				sql: `
+					SELECT
+						name,
+						count,
+						users,
+						sessions,
+						representative_path as path,
+						representative_error_type as error_type,
+						representative_filename as filename,
+						representative_line as line,
+						representative_stack as stack,
+						last_seen
+					FROM (
+						SELECT
+							es.message as name,
+							count() as count,
+							uniqIf(es.anonymous_id, es.anonymous_id != '') as users,
+							uniqIf(es.session_id, es.session_id != '') as sessions,
+							argMax(${normalizedPath}, ${representativeRank}) as representative_path,
+							argMax(es.error_type, ${representativeRank}) as representative_error_type,
+							argMax(ifNull(es.filename, ''), ${representativeRank}) as representative_filename,
+							nullIf(argMax(ifNull(es.lineno, 0), ${representativeRank}), 0) as representative_line,
+							argMax(substring(ifNull(es.stack, ''), 1, 1000), ${representativeRank}) as representative_stack,
+							max(es.timestamp) as last_seen
+						FROM ${Analytics.error_spans} es
+						WHERE es.client_id = {websiteId:String}
+							AND es.timestamp >= toDateTime({startDate:String})
+							AND es.timestamp <= toDateTime(concat({endDate:String}, ' 23:59:59'))
+							AND es.message != ''
+							${filterClause}
+						GROUP BY es.message
+					)
+					ORDER BY users DESC, sessions DESC, count DESC, last_seen DESC
+					LIMIT {limit:UInt32}
+				`,
+				params: {
+					websiteId,
+					startDate,
+					endDate,
+					limit,
+					...filterParams,
+				},
+			};
+		},
+		timeField: "timestamp",
+		allowedFilters: ["message", "path", "error_type"],
+		customizable: true,
+		noCache: true,
+	},
+
 	error_trends: {
+		meta: {
+			description: "Error counts over time to identify spikes and trends.",
+			category: "Errors",
+			tags: ["errors", "trends", "time-series"],
+		},
 		table: Analytics.error_spans,
 		fields: [
 			"toDate(timestamp) as date",
@@ -115,6 +207,11 @@ export const ErrorsBuilders: Record<string, SimpleQueryConfig> = {
 	},
 
 	errors_by_page: {
+		meta: {
+			description: "Error counts grouped by the page where they occurred.",
+			category: "Errors",
+			tags: ["errors", "pages"],
+		},
 		table: Analytics.error_spans,
 		fields: [
 			"CASE WHEN trimRight(path(path), '/') = '' THEN '/' ELSE trimRight(path(path), '/') END as name",
@@ -133,6 +230,11 @@ export const ErrorsBuilders: Record<string, SimpleQueryConfig> = {
 	},
 
 	error_frequency: {
+		meta: {
+			description: "Error frequency and recurrence patterns.",
+			category: "Errors",
+			tags: ["errors", "frequency"],
+		},
 		table: Analytics.error_spans,
 		fields: ["toDate(timestamp) as date", "COUNT(*) as count"],
 		where: ["message != ''"],
@@ -146,6 +248,8 @@ export const ErrorsBuilders: Record<string, SimpleQueryConfig> = {
 		meta: {
 			title: "Error Summary",
 			description: "Overview of errors with calculated error rate",
+			category: "Errors",
+			tags: ["errors", "summary", "overview"],
 			version: "1.0",
 		},
 		customSql: (ctx) => {
@@ -198,6 +302,11 @@ export const ErrorsBuilders: Record<string, SimpleQueryConfig> = {
 	},
 
 	error_chart_data: {
+		meta: {
+			description: "Error counts formatted for time-series chart display.",
+			category: "Errors",
+			tags: ["errors", "chart", "time-series"],
+		},
 		table: Analytics.error_spans,
 		fields: [
 			"toDate(timestamp) as date",
@@ -212,6 +321,12 @@ export const ErrorsBuilders: Record<string, SimpleQueryConfig> = {
 	},
 
 	errors_by_type: {
+		meta: {
+			description:
+				"Errors grouped by JS error class (TypeError, ReferenceError, …) with count, affected users, and sessions. For grouping by error message use error_types.",
+			category: "Errors",
+			tags: ["errors", "class", "triage"],
+		},
 		table: Analytics.error_spans,
 		fields: [
 			"error_type as name",

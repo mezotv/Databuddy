@@ -8,6 +8,8 @@ export type Middleware = (
 ) => BatchEventInput | null | Promise<BatchEventInput | null>;
 
 export interface DatabuddyConfig {
+	/** Whether Databuddy anonymizes visitor IDs before storage. Default: true. */
+	anonymizeVisitorIds?: boolean | "auto";
 	/** API key for authentication (`dbdy_xxx`) */
 	apiKey: string;
 	/** Event ingestion endpoint (default: `'https://basket.databuddy.cc'`) */
@@ -36,12 +38,16 @@ export interface DatabuddyConfig {
 }
 
 export interface CustomEventInput {
+	/** Overrides config default */
+	anonymizeVisitorIds?: boolean | "auto" | null;
 	anonymousId?: string | null;
 	/** Unique ID for deduplication */
 	eventId?: string;
 	name: string;
 	/** Overrides config default */
 	namespace?: string | null;
+	/** The identified user this event belongs to (from identify()) */
+	profileId?: string | null;
 	properties?: Record<string, unknown> | null;
 	sessionId?: string | null;
 	/** Overrides config default */
@@ -52,17 +58,47 @@ export interface CustomEventInput {
 	websiteId?: string | null;
 }
 
-export interface EventResponse {
+export interface FailureDetails {
+	code?: string;
+	fix?: string;
+	requestId?: string;
+	retryable?: boolean;
+	statusCode?: number;
+	why?: string;
+}
+
+export interface EventResponse extends FailureDetails {
+	delivery?: "delivered" | "queued" | "skipped";
 	error?: string;
 	eventId?: string;
 	success: boolean;
 }
 
+/**
+ * User metadata attached via identify(). Scalar values only — nested objects
+ * and arrays are rejected by the server. Limits: 50 keys, 2KB serialized.
+ * Setting a value to `null` removes that trait. Special keys promoted to
+ * profile fields: `email` (lowercased), `username` and `name` (display name).
+ */
+export type ProfileTraits = Record<string, string | number | boolean | null>;
+
+export interface IdentifyInput {
+	/** Raw client anonymous ID (anon_*) to link past device activity */
+	anonymousId?: string | null;
+	/** Your user's stable, unique ID (max 128 chars, stored verbatim) */
+	profileId: string;
+	traits?: ProfileTraits | null;
+	/** Overrides config default */
+	websiteId?: string | null;
+}
+
 export interface BatchEventInput {
+	anonymizeVisitorIds?: boolean | "auto" | null;
 	anonymousId?: string | null;
 	eventId?: string;
 	name: string;
 	namespace?: string | null;
+	profileId?: string | null;
 	properties?: Record<string, unknown> | null;
 	sessionId?: string | null;
 	source?: string | null;
@@ -75,7 +111,8 @@ export interface GlobalProperties {
 	[key: string]: unknown;
 }
 
-export interface BatchEventResponse {
+export interface BatchEventResponse extends FailureDetails {
+	delivery?: "delivered" | "skipped";
 	error?: string;
 	processed?: number;
 	results?: Array<{

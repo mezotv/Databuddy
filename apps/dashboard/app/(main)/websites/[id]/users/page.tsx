@@ -12,19 +12,24 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import { useDateFilters } from "@/hooks/use-date-filters";
+import { useTraitKeys, useTraitValues } from "@/hooks/use-profiles";
+import { orpc } from "@/lib/orpc";
 import { getDeviceIcon } from "@/components/device-icon";
 import { dynamicQueryFiltersAtom } from "@/stores/jotai/filterAtoms";
 import type { DynamicQueryFilter } from "@/stores/jotai/filterAtoms";
 import {
+	formatCountryName,
 	getCountryCode,
-	getCountryName,
 } from "@databuddy/shared/country-codes";
 import type { ProfileData } from "@/types/analytics";
 import {
 	ArrowDownIcon,
+	ArrowsClockwiseIcon,
 	ArrowUpIcon,
 	GlobeIcon,
 	LightningIcon,
+	MagnifyingGlassIcon,
+	TagIcon,
 	UsersIcon,
 } from "@databuddy/ui/icons";
 import {
@@ -36,14 +41,29 @@ import {
 import { useAtomValue } from "jotai";
 import Image from "next/image";
 import { notFound, useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { formatCurrency } from "@/lib/formatters";
 import { generateProfileName } from "./[userId]/_components/generate-profile-name";
 import { type ProfileSort, useProfilesData } from "./use-users";
 import { useEventNames } from "./use-event-names";
-import { Badge, EmptyState, Skeleton, Tooltip, dayjs } from "@databuddy/ui";
+import {
+	Badge,
+	Button,
+	EmptyState,
+	Input,
+	Skeleton,
+	Tooltip,
+	dayjs,
+} from "@databuddy/ui";
+import { toast } from "sonner";
 import { DropdownMenu } from "@databuddy/ui/client";
 
 const wwwRegex = /^www\./;
+
+const activeFilterChipClass =
+	"flex items-center gap-1 rounded-md bg-primary/10 px-2.5 py-1 font-medium text-primary text-xs transition-colors hover:bg-primary/15";
+const filterTriggerClass =
+	"flex items-center gap-1 rounded-md px-2.5 py-1 font-medium text-muted-foreground text-xs transition-colors hover:bg-secondary/50 hover:text-foreground";
 
 type SortField =
 	| "session_count"
@@ -56,7 +76,7 @@ interface SortState {
 	order: "asc" | "desc";
 }
 
-type PresetKey = "all" | "power" | "new" | "returning";
+type PresetKey = "all" | "identified" | "power" | "new" | "returning";
 
 interface PresetConfig {
 	filters: DynamicQueryFilter[];
@@ -66,6 +86,10 @@ interface PresetConfig {
 
 const PRESETS: Record<PresetKey, PresetConfig> = {
 	all: { label: "All", filters: [] },
+	identified: {
+		label: "Identified",
+		filters: [{ field: "profile_id", operator: "ne", value: "" }],
+	},
 	power: {
 		label: "Power users",
 		filters: [{ field: "session_count", operator: "not_in", value: [1, 2] }],
@@ -151,6 +175,9 @@ function SkeletonRow() {
 				<Skeleton className="h-4 w-6" />
 			</TableCell>
 			<TableCell className="h-[49px] py-2">
+				<Skeleton className="h-4 w-12" />
+			</TableCell>
+			<TableCell className="h-[49px] py-2">
 				<Skeleton className="h-5 w-12 rounded-full" />
 			</TableCell>
 			<TableCell className="h-[49px] py-2">
@@ -178,17 +205,26 @@ export default function UsersPage() {
 		order: "desc",
 	});
 	const [eventFilter, setEventFilter] = useState<string | null>(null);
+	const [emailQuery, setEmailQuery] = useState("");
+	const [emailSearching, setEmailSearching] = useState(false);
+	const [traitFilter, setTraitFilter] = useState<{
+		key: string;
+		value: string | null;
+	} | null>(null);
 	const [page, setPage] = useState(1);
 	const [allUsers, setAllUsers] = useState<ProfileData[]>([]);
-	const [isReplacing, setIsReplacing] = useState(false);
 	const [loadMoreRef, setLoadMoreRef] = useState<HTMLTableCellElement | null>(
 		null
 	);
 	const [scrollContainerRef, setScrollContainerRef] =
 		useState<HTMLDivElement | null>(null);
-	const [isInitialLoad, setIsInitialLoad] = useState(true);
 
 	const { eventNames } = useEventNames(websiteId, dateRange);
+	const { data: traitKeys } = useTraitKeys(websiteId);
+	const { data: traitValues, isPending: traitValuesPending } = useTraitValues(
+		websiteId,
+		traitFilter && !traitFilter.value ? traitFilter.key : null
+	);
 
 	const mergedFilters = useMemo(() => {
 		const preset = PRESETS[activePreset];
@@ -203,15 +239,30 @@ export default function UsersPage() {
 				value: eventFilter,
 			});
 		}
+		if (traitFilter?.value) {
+			filters.push({
+				field: `trait:${traitFilter.key}`,
+				operator: "eq",
+				value: traitFilter.value,
+			});
+		}
 		return filters;
-	}, [globalFilters, activePreset, eventFilter]);
+	}, [globalFilters, activePreset, eventFilter, traitFilter]);
 
 	const profileSort: ProfileSort = useMemo(
 		() => ({ field: sort.field, order: sort.order }),
 		[sort.field, sort.order]
 	);
 
-	const { profiles, pagination, isLoading, isError, error } = useProfilesData(
+	const {
+		profiles,
+		pagination,
+		isLoading,
+		isFetching,
+		isError,
+		error,
+		refetch,
+	} = useProfilesData(
 		websiteId,
 		dateRange,
 		50,
@@ -221,17 +272,13 @@ export default function UsersPage() {
 		profileSort
 	);
 
-	const hasUsersRef = useRef(false);
-	hasUsersRef.current = allUsers.length > 0;
-
 	useEffect(() => {
 		setPage(1);
-		if (hasUsersRef.current) {
-			setIsReplacing(true);
-		} else {
-			setIsInitialLoad(true);
-		}
 	}, [dateRange, mergedFilters, sort]);
+
+	const isInitialLoad = isLoading && allUsers.length === 0;
+	const isReplacing =
+		isLoading && page === 1 && profiles.length === 0 && allUsers.length > 0;
 
 	const handleSort = useCallback((field: SortField) => {
 		setSort((prev) => {
@@ -282,21 +329,15 @@ export default function UsersPage() {
 	}, [loadMoreRef, scrollContainerRef, handleIntersection]);
 
 	useEffect(() => {
-		if (!profiles?.length) {
-			if (!isLoading && isReplacing) {
-				setAllUsers([]);
-				setIsReplacing(false);
+		if (page === 1) {
+			if (profiles.length > 0 || !isLoading) {
+				setAllUsers(profiles);
 			}
 			return;
 		}
-
-		if (isReplacing) {
-			setAllUsers(profiles);
-			setIsReplacing(false);
-			setIsInitialLoad(false);
+		if (isLoading) {
 			return;
 		}
-
 		setAllUsers((prev) => {
 			const existingUsers = new Map(prev.map((u) => [u.visitor_id, u]));
 			let hasNewUsers = false;
@@ -308,14 +349,9 @@ export default function UsersPage() {
 				}
 			}
 
-			if (hasNewUsers) {
-				return Array.from(existingUsers.values());
-			}
-
-			return prev;
+			return hasNewUsers ? Array.from(existingUsers.values()) : prev;
 		});
-		setIsInitialLoad(false);
-	}, [profiles, isLoading, isReplacing]);
+	}, [profiles, isLoading, page]);
 
 	const columns = useMemo<ColumnDef<ProfileData>[]>(
 		() => [
@@ -324,7 +360,13 @@ export default function UsersPage() {
 				header: "User",
 				accessorKey: "visitor_id",
 				cell: ({ row }) => {
-					const profileName = generateProfileName(row.original.visitor_id);
+					const { display_name, email, profile_id, visitor_id } = row.original;
+					const displayName =
+						display_name ||
+						email ||
+						profile_id ||
+						generateProfileName(visitor_id);
+					const secondary = display_name && email ? email : null;
 					return (
 						<div className="flex items-center gap-2.5">
 							<Image
@@ -335,7 +377,16 @@ export default function UsersPage() {
 								unoptimized
 								width={32}
 							/>
-							<span className="truncate font-medium">{profileName}</span>
+							<div className="min-w-0">
+								<span className="block truncate font-medium">
+									{displayName}
+								</span>
+								{secondary ? (
+									<span className="block truncate text-muted-foreground text-xs">
+										{secondary}
+									</span>
+								) : null}
+							</div>
 						</div>
 					);
 				},
@@ -345,9 +396,8 @@ export default function UsersPage() {
 				id: "location",
 				header: "Location",
 				cell: ({ row }) => {
-					const country = row.original.country || "";
-					const countryCode = getCountryCode(country);
-					const countryName = getCountryName(countryCode);
+					const countryCode = getCountryCode(row.original.country || "");
+					const countryName = formatCountryName(row.original.country);
 					const isUnknown = !countryCode || countryCode === "Unknown";
 
 					return (
@@ -358,7 +408,7 @@ export default function UsersPage() {
 								<CountryFlag country={countryCode} size="sm" />
 							)}
 							<span className="truncate text-sm">
-								{isUnknown ? "Unknown" : countryName || countryCode}
+								{countryName || "Unknown"}
 							</span>
 						</div>
 					);
@@ -468,6 +518,26 @@ export default function UsersPage() {
 				size: 70,
 			},
 			{
+				id: "ltv",
+				header: () => (
+					<Tooltip content="Lifetime revenue, refunds netted" side="top">
+						<span>LTV</span>
+					</Tooltip>
+				),
+				cell: ({ row }) => {
+					const ltv = row.original.ltv ?? 0;
+					if (ltv === 0) {
+						return <span className="text-muted-foreground text-sm">—</span>;
+					}
+					return (
+						<span className="font-medium tabular-nums">
+							{formatCurrency(ltv)}
+						</span>
+					);
+				},
+				size: 90,
+			},
+			{
 				id: "type",
 				header: "Type",
 				cell: ({ row }) => {
@@ -534,7 +604,7 @@ export default function UsersPage() {
 					<div className="mx-1 h-4 w-px bg-border" />
 					{eventFilter ? (
 						<button
-							className="flex items-center gap-1 rounded-md bg-primary/10 px-2.5 py-1 font-medium text-primary text-xs transition-colors hover:bg-primary/15"
+							className={activeFilterChipClass}
 							onClick={() => setEventFilter(null)}
 							type="button"
 						>
@@ -546,10 +616,7 @@ export default function UsersPage() {
 						<DropdownMenu>
 							<DropdownMenu.Trigger
 								render={
-									<button
-										className="flex items-center gap-1 rounded-md px-2.5 py-1 font-medium text-muted-foreground text-xs transition-colors hover:bg-secondary/50 hover:text-foreground"
-										type="button"
-									>
+									<button className={filterTriggerClass} type="button">
 										<LightningIcon className="size-3" />
 										Event filter
 									</button>
@@ -574,15 +641,158 @@ export default function UsersPage() {
 					)}
 				</>
 			)}
+
+			{(traitKeys?.length ?? 0) > 0 && (
+				<>
+					<div className="mx-1 h-4 w-px bg-border" />
+					{traitFilter?.value ? (
+						<button
+							className={activeFilterChipClass}
+							onClick={() => setTraitFilter(null)}
+							type="button"
+						>
+							<TagIcon className="size-3" />
+							{traitFilter.key} = {traitFilter.value}
+							<span className="text-[10px] leading-none">✕</span>
+						</button>
+					) : traitFilter ? (
+						<DropdownMenu
+							key="trait-values"
+							onOpenChange={(open) => {
+								if (!open) {
+									setTraitFilter((prev) => (prev?.value ? prev : null));
+								}
+							}}
+							open
+						>
+							<DropdownMenu.Trigger
+								render={
+									<button
+										className="flex items-center gap-1 rounded-md bg-secondary/50 px-2.5 py-1 font-medium text-muted-foreground text-xs"
+										type="button"
+									>
+										<TagIcon className="size-3" />
+										{traitFilter.key} = …
+									</button>
+								}
+							/>
+							<DropdownMenu.Content align="start" side="bottom">
+								<DropdownMenu.Group>
+									<DropdownMenu.GroupLabel>
+										{traitFilter.key} value
+									</DropdownMenu.GroupLabel>
+									{traitValues?.length ? (
+										traitValues.map((value) => (
+											<DropdownMenu.Item
+												key={value}
+												onClick={() =>
+													setTraitFilter({ key: traitFilter.key, value })
+												}
+											>
+												{value}
+											</DropdownMenu.Item>
+										))
+									) : (
+										<DropdownMenu.Item disabled>
+											{traitValuesPending ? "Loading…" : "No values found"}
+										</DropdownMenu.Item>
+									)}
+								</DropdownMenu.Group>
+							</DropdownMenu.Content>
+						</DropdownMenu>
+					) : (
+						<DropdownMenu key="trait-keys">
+							<DropdownMenu.Trigger
+								render={
+									<button className={filterTriggerClass} type="button">
+										<TagIcon className="size-3" />
+										Trait filter
+									</button>
+								}
+							/>
+							<DropdownMenu.Content align="start" side="bottom">
+								<DropdownMenu.Group>
+									<DropdownMenu.GroupLabel>
+										Filter by trait
+									</DropdownMenu.GroupLabel>
+									{(traitKeys ?? []).map((key) => (
+										<DropdownMenu.Item
+											key={key}
+											onClick={() => setTraitFilter({ key, value: null })}
+										>
+											{key}
+										</DropdownMenu.Item>
+									))}
+								</DropdownMenu.Group>
+							</DropdownMenu.Content>
+						</DropdownMenu>
+					)}
+				</>
+			)}
 		</div>
 	);
 
-	if (isLoading && isInitialLoad) {
+	const refreshAction = (
+		<TopBar.Actions>
+			<form
+				className="flex items-center"
+				onSubmit={async (e) => {
+					e.preventDefault();
+					const email = emailQuery.trim().toLowerCase();
+					if (!email || emailSearching) {
+						return;
+					}
+					setEmailSearching(true);
+					try {
+						const found = await orpc.profiles.findByEmail.call({
+							websiteId,
+							email,
+						});
+						if (found) {
+							router.push(`/websites/${websiteId}/users/${found.profileId}`);
+						} else {
+							toast.info("No user found with that email");
+						}
+					} catch {
+						toast.error("Search failed, try again");
+					} finally {
+						setEmailSearching(false);
+					}
+				}}
+			>
+				<div className="relative">
+					<MagnifyingGlassIcon className="absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+					<Input
+						className="h-8 w-52 pl-7 text-xs"
+						disabled={emailSearching}
+						onChange={(e) => setEmailQuery(e.target.value)}
+						placeholder="Find by email"
+						type="email"
+						value={emailQuery}
+					/>
+				</div>
+			</form>
+			<Button
+				disabled={isFetching}
+				onClick={() => refetch()}
+				size="icon"
+				title="Refresh"
+				variant="ghost"
+			>
+				<ArrowsClockwiseIcon
+					className={isFetching ? "size-4 animate-spin" : "size-4"}
+				/>
+			</Button>
+		</TopBar.Actions>
+	);
+
+	if (isInitialLoad) {
 		return (
 			<div className="flex h-full flex-col">
 				<TopBar.Title>
 					<h1 className="font-semibold text-sm">Users</h1>
 				</TopBar.Title>
+				{refreshAction}
 
 				{presetBar}
 
@@ -620,6 +830,7 @@ export default function UsersPage() {
 				<TopBar.Title>
 					<h1 className="font-semibold text-sm">Users</h1>
 				</TopBar.Title>
+				{refreshAction}
 
 				<div className="flex min-h-0 flex-1 flex-col items-center justify-center py-24 text-center text-muted-foreground">
 					<UsersIcon className="mb-4 size-12 opacity-50" />
@@ -632,12 +843,13 @@ export default function UsersPage() {
 		);
 	}
 
-	if (!(isReplacing || isInitialLoad) && (!allUsers || allUsers.length === 0)) {
+	if (!isLoading && allUsers.length === 0) {
 		return (
 			<div className="flex h-full flex-col">
 				<TopBar.Title>
 					<h1 className="font-semibold text-sm">Users</h1>
 				</TopBar.Title>
+				{refreshAction}
 
 				{presetBar}
 
@@ -656,6 +868,7 @@ export default function UsersPage() {
 			<TopBar.Title>
 				<h1 className="font-semibold text-sm">Users</h1>
 			</TopBar.Title>
+			{refreshAction}
 
 			{presetBar}
 

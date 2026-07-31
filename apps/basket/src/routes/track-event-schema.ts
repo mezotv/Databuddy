@@ -1,4 +1,8 @@
-import { MAX_FUTURE_MS, MIN_TIMESTAMP } from "@databuddy/validation";
+import {
+	MAX_FUTURE_MS,
+	MIN_TIMESTAMP,
+	profileIdSchema,
+} from "@databuddy/validation";
 import { VALIDATION_LIMITS } from "@utils/validation";
 import { z } from "zod";
 
@@ -37,12 +41,19 @@ const timestampSchema = z.union([
 	}, "Invalid timestamp"),
 ]);
 
+const anonymizeVisitorIds = z
+	.union([z.boolean(), z.literal("auto")])
+	.optional();
+
 const trackEventObject = z.object({
 	name: z.string().min(1).max(256),
 	namespace: z.string().max(64).optional(),
+	path: z.string().max(VALIDATION_LIMITS.STRING_MAX_LENGTH).optional(),
 	timestamp: timestampSchema.optional(),
 	properties: boundedProperties.optional(),
 	anonymousId: z.string().max(256).optional(),
+	anonymizeVisitorIds,
+	profileId: profileIdSchema.optional(),
 	sessionId: z.string().max(256).optional(),
 	websiteId: z
 		.string()
@@ -50,6 +61,8 @@ const trackEventObject = z.object({
 		.optional(),
 	source: z.string().max(64).optional(),
 });
+
+export type TrackEventPayload = z.infer<typeof trackEventObject>;
 
 export const trackEventSchema = z.union([
 	trackEventObject,

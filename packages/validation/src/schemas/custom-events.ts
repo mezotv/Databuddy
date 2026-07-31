@@ -1,5 +1,12 @@
 import z from "zod";
 import { VALIDATION_LIMITS } from "../constants";
+import { profileIdSchema } from "./identity";
+
+const anonymizeVisitorIds = z
+	.union([z.boolean(), z.literal("auto")])
+	.nullable()
+	.optional()
+	.transform((value) => value ?? undefined);
 
 const boundedPropertiesJson = z
 	.json()
@@ -20,6 +27,7 @@ export const customEventSchema = z.object({
 	eventId: z.string().max(VALIDATION_LIMITS.EVENT_ID_MAX_LENGTH).optional(),
 	name: z.string().min(1).max(VALIDATION_LIMITS.NAME_MAX_LENGTH),
 	anonymousId: z.string().nullable().optional(),
+	anonymizeVisitorIds,
 	sessionId: z.string().nullable().optional(),
 	timestamp: z.number().int().nullable().optional(),
 	properties: boundedPropertiesJson.optional().nullable(),
@@ -35,6 +43,8 @@ export const customEventSpanSchema = z.object({
 		.max(VALIDATION_LIMITS.ANONYMOUS_ID_MAX_LENGTH)
 		.nullable()
 		.optional(),
+	anonymizeVisitorIds,
+	profileId: profileIdSchema.nullable().optional(),
 	sessionId: z
 		.string()
 		.max(VALIDATION_LIMITS.SESSION_ID_MAX_LENGTH)
@@ -52,6 +62,7 @@ export type CustomEventSpanInput = z.infer<typeof customEventSpanSchema>;
 export const outgoingLinkSchema = z.object({
 	eventId: z.string().max(VALIDATION_LIMITS.EVENT_ID_MAX_LENGTH),
 	anonymousId: z.string().nullable().optional(),
+	anonymizeVisitorIds,
 	sessionId: z.string().nullable().optional(),
 	timestamp: z.number().int().nullable().optional(),
 	href: z.string().max(VALIDATION_LIMITS.PATH_MAX_LENGTH),

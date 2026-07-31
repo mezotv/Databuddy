@@ -28,6 +28,12 @@ import { applyPlugins } from "./utils";
 export function getClickHouseQuerySettings(
 	noCache?: boolean
 ): Record<string, string | number> {
+	if (
+		process.env.CLICKHOUSE_READONLY_URL &&
+		process.env.CLICKHOUSE_URL === process.env.CLICKHOUSE_READONLY_URL
+	) {
+		return {};
+	}
 	if (noCache) {
 		return { use_query_cache: 0 };
 	}
@@ -41,7 +47,7 @@ const FIELD_ALIAS_PATTERN = /\s+as\s+([A-Za-z_][A-Za-z0-9_]*)\s*$/i;
 const SIMPLE_FIELD_PATTERN = /^[A-Za-z_][A-Za-z0-9_.]*$/;
 
 // Filters that are always allowed regardless of per-builder allowedFilters
-const GLOBAL_ALLOWED_FILTERS = [
+const GLOBAL_ALLOWED_FILTERS = new Set([
 	"path",
 	"query_string",
 	"country",
@@ -56,7 +62,23 @@ const GLOBAL_ALLOWED_FILTERS = [
 	"utm_source",
 	"utm_medium",
 	"utm_campaign",
-] as const;
+]);
+
+export function isFilterFieldAllowed(
+	config: SimpleQueryConfig,
+	field: string
+): boolean {
+	return (
+		GLOBAL_ALLOWED_FILTERS.has(field) ||
+		(config.allowedFilters?.includes(field) ?? false)
+	);
+}
+
+export function allowedFilterFields(config: SimpleQueryConfig): string[] {
+	return [
+		...new Set([...GLOBAL_ALLOWED_FILTERS, ...(config.allowedFilters ?? [])]),
+	];
+}
 
 const ALLOWED_GROUPBY_FIELDS = new Set([
 	"country",
@@ -96,7 +118,6 @@ const ALLOWED_ORDERBY_FIELDS = new Set([
 	"date",
 	"time",
 	"errors",
-	"p50_load_time",
 	"avg_scroll_depth",
 	"uptime_percentage",
 	"revenue",
@@ -214,16 +235,18 @@ function validateGroupByField(field: string): void {
 	}
 }
 
-const ORDER_BY_REGEX = /^(\w+)\s+(ASC|DESC)$/i;
+const ORDER_BY_REGEX = /^(\w+)(?:\s+(ASC|DESC))?$/i;
 
-function validateOrderByField(orderBy: string): void {
-	const match = orderBy.match(ORDER_BY_REGEX);
+function normalizeOrderBy(orderBy: string): string {
+	const match = orderBy.trim().match(ORDER_BY_REGEX);
 	const field = match?.[1];
-	if (!(field && ALLOWED_ORDERBY_FIELDS.has(field))) {
+	if (!(match && field && ALLOWED_ORDERBY_FIELDS.has(field))) {
 		throw new Error(
-			`Ordering by '${orderBy}' is not permitted. Use '<field> ASC|DESC' where field is one of: ${listAllowed(ALLOWED_ORDERBY_FIELDS)}.`
+			`Ordering by '${orderBy}' is not permitted. Use '<field>' or '<field> ASC|DESC' where field is one of: ${listAllowed(ALLOWED_ORDERBY_FIELDS)}.`
 		);
 	}
+	const direction = match[2]?.toUpperCase() ?? "DESC";
+	return `${field} ${direction}`;
 }
 
 function buildDeviceTypeSQL(
@@ -325,18 +348,9 @@ export class SimpleQueryBuilder {
 		index: number,
 		options?: { sessionAttributionAlias?: string }
 	): FilterResult {
-		const isGloballyAllowed = GLOBAL_ALLOWED_FILTERS.includes(
-			filter.field as (typeof GLOBAL_ALLOWED_FILTERS)[number]
-		);
-		if (
-			!(isGloballyAllowed || this.config.allowedFilters?.includes(filter.field))
-		) {
-			const allowed = new Set<string>(GLOBAL_ALLOWED_FILTERS);
-			for (const f of this.config.allowedFilters ?? []) {
-				allowed.add(f);
-			}
+		if (!isFilterFieldAllowed(this.config, filter.field)) {
 			throw new Error(
-				`Filter on field '${filter.field}' is not permitted. Allowed fields for this query: ${listAllowed(allowed)}.`
+				`Filter on field '${filter.field}' is not permitted. Allowed fields for this query: ${listAllowed(allowedFilterFields(this.config))}.`
 			);
 		}
 
@@ -1040,6 +1054,11 @@ export class SimpleQueryBuilder {
 				if (!filter || filter.target || filter.having) {
 					continue;
 				}
+				// Unsupported filters are skipped so one multi-query batch can share
+				// dimension-specific filters without breaking unrelated query types.
+				if (!isFilterFieldAllowed(this.config, filter.field)) {
+					continue;
+				}
 				const { clause, params: filterParams } = this.buildFilter(
 					filter,
 					i,
@@ -1079,8 +1098,7 @@ export class SimpleQueryBuilder {
 
 	private buildOrderByClause(): string {
 		if (this.request.orderBy) {
-			validateOrderByField(this.request.orderBy);
-			return ` ORDER BY ${this.request.orderBy}`;
+			return ` ORDER BY ${normalizeOrderBy(this.request.orderBy)}`;
 		}
 		if (this.config.orderBy) {
 			return ` ORDER BY ${this.config.orderBy}`;
@@ -1097,9 +1115,10 @@ export class SimpleQueryBuilder {
 		return this.request.offset ? ` OFFSET ${this.request.offset}` : "";
 	}
 
-	async execute(): Promise<Record<string, unknown>[]> {
+	async execute(abortSignal?: AbortSignal): Promise<Record<string, unknown>[]> {
 		const { sql, params } = this.compile();
 		const rawData = await chQuery<Record<string, unknown>>(sql, params, {
+			abort_signal: abortSignal,
 			clickhouse_settings: getClickHouseQuerySettings(this.config.noCache),
 		});
 		return applyPlugins(rawData, this.config, this.websiteDomain);

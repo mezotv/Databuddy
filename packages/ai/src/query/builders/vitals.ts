@@ -137,7 +137,16 @@ export const VitalsBuilders: Record<string, SimpleQueryConfig> = {
 				FROM (
 					SELECT
 						metric_name,
-						quantilesTDigest(0.50, 0.75, 0.90, 0.95, 0.99)(metric_value) as _q,
+						quantilesDeterministic(0.50, 0.75, 0.90, 0.95, 0.99)(
+							metric_value,
+							cityHash64(tuple(
+								timestamp,
+								metric_value,
+								session_id,
+								anonymous_id,
+								path
+							))
+						) as _q,
 						avg(metric_value) as avg_value,
 						count() as samples
 					FROM ${Analytics.web_vitals_spans}
@@ -323,43 +332,5 @@ export const VitalsBuilders: Record<string, SimpleQueryConfig> = {
 		timeField: "timestamp",
 		customizable: true,
 		plugins: { normalizeGeo: true, deduplicateGeo: true },
-	},
-
-	performance_overview: {
-		meta: {
-			title: "Performance Overview",
-			description:
-				"Average load, DOM ready, and render times across pageviews.",
-			category: "Performance",
-			tags: ["performance", "overview"],
-			output_fields: [
-				{ name: "avg_load_time", type: "number", label: "Avg Load Time" },
-				{ name: "avg_dom_ready_time", type: "number", label: "Avg DOM Ready" },
-				{ name: "avg_render_time", type: "number", label: "Avg Render" },
-			],
-			default_visualization: "metric",
-			version: "1.0",
-		},
-		customSql: (ctx) => {
-			const { websiteId, startDate, endDate } = ctx;
-			return {
-				sql: `
-				SELECT 
-					AVG(CASE WHEN load_time > 0 THEN load_time ELSE NULL END) as avg_load_time,
-					AVG(CASE WHEN dom_ready_time > 0 THEN dom_ready_time ELSE NULL END) as avg_dom_ready_time,
-					AVG(CASE WHEN render_time > 0 THEN render_time ELSE NULL END) as avg_render_time
-				FROM ${Analytics.events}
-				WHERE 
-					client_id = {websiteId:String}
-					AND event_name = 'screen_view'
-					AND time >= toDateTime({startDate:String})
-					AND time <= toDateTime(concat({endDate:String}, ' 23:59:59'))
-					AND load_time > 0
-			`,
-				params: { websiteId, startDate, endDate },
-			};
-		},
-		timeField: "time",
-		customizable: false,
 	},
 };

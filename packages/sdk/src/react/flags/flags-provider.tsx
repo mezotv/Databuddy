@@ -56,13 +56,10 @@ export function FlagsProvider({ children, ...config }: FlagsProviderProps) {
 		if (typeof window === "undefined") {
 			return;
 		}
-		const w = window as unknown as {
-			__databuddyFlags?: BrowserFlagsManager;
-		};
-		w.__databuddyFlags = manager;
+		window.__databuddyFlags = manager;
 		return () => {
-			if (w.__databuddyFlags === manager) {
-				w.__databuddyFlags = undefined;
+			if (window.__databuddyFlags === manager) {
+				window.__databuddyFlags = undefined;
 			}
 		};
 	}, [manager]);
@@ -134,6 +131,7 @@ export function FlagsProvider({ children, ...config }: FlagsProviderProps) {
 			updateUser: (user: UserContext) => manager.updateUser(user),
 			refresh: (forceClear = false) => manager.refresh(forceClear),
 			isReady: store.isReady,
+			lastError: store.lastError,
 		}),
 		[manager, store, config.isPending]
 	);
@@ -164,6 +162,7 @@ export function useFlags(): FlagsContext {
 			updateUser: () => {},
 			refresh: async () => {},
 			isReady: false,
+			lastError: null,
 		};
 	}
 	return context;

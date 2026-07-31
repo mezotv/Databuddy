@@ -3,6 +3,7 @@ import fg from "fast-glob";
 import matter from "gray-matter";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { developerResources } from "@/lib/agent-discovery";
 
 export const revalidate = false;
 
@@ -10,13 +11,14 @@ const BASE_URL = "https://www.databuddy.cc/docs";
 
 const HEADER = `# Databuddy Documentation
 
-> Privacy-first web analytics. 65x faster than Google Analytics, GDPR compliant, no cookies required.
+> Lightweight web analytics with an asynchronous tracker, GDPR compliant, no cookies required.
 > For the full documentation corpus, see [llms-full.txt](https://www.databuddy.cc/llms-full.txt).
 
 `;
 
 const SECTION_ORDER = [
 	"root",
+	"sdk",
 	"api",
 	"Integrations",
 	"hooks",
@@ -76,11 +78,18 @@ export async function GET() {
 		})
 		.join("\n\n");
 
-	const body = HEADER + sections;
+	const resourceList = developerResources
+		.map(
+			(resource) =>
+				`- [${resource.title}](${resource.url}): ${resource.description}`
+		)
+		.join("\n");
+
+	const body = `${HEADER}## Developer Resources\n${resourceList}\n\n${sections}`;
 
 	return new Response(body, {
 		headers: {
-			"Content-Type": "text/plain; charset=utf-8",
+			"Content-Type": "text/markdown; charset=utf-8",
 			"Cache-Control": "public, max-age=3600, must-revalidate",
 			ETag: `"${createHash("sha256").update(body).digest("hex").slice(0, 16)}"`,
 		},

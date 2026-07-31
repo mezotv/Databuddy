@@ -13,8 +13,13 @@ import type { CreateFunnelData } from "@/types/funnels";
 import { cn } from "@/lib/utils";
 import { GATED_FEATURES } from "@databuddy/shared/types/features";
 import dynamic from "next/dynamic";
-import { useParams } from "next/navigation";
-import { useState } from "react";
+import {
+	useParams,
+	usePathname,
+	useRouter,
+	useSearchParams,
+} from "next/navigation";
+import { useEffect, useState } from "react";
 import { TopBar } from "@/components/layout/top-bar";
 import {
 	FunnelAnalytics,
@@ -48,12 +53,27 @@ function FunnelsListSkeleton() {
 export default function FunnelsPage() {
 	const { id } = useParams();
 	const websiteId = id as string;
+	const pathname = usePathname();
+	const isDemoRoute = pathname.startsWith("/demo/");
 	const { formattedDateRangeState, dateRange } = useDateFilters();
 
 	const [expandedId, setExpandedId] = useState<string | null>(null);
 	const [selectedReferrer, setSelectedReferrer] = useState("all");
 	const [editing, setEditing] = useState<FunnelItemData | "new" | null>(null);
 	const [deletingId, setDeletingId] = useState<string | null>(null);
+
+	const router = useRouter();
+	const searchParams = useSearchParams();
+
+	useEffect(() => {
+		if (!isDemoRoute && searchParams.get("new") === "funnel") {
+			setEditing("new");
+			const params = new URLSearchParams(searchParams);
+			params.delete("new");
+			const query = params.toString();
+			router.replace(query ? `${pathname}?${query}` : pathname);
+		}
+	}, [searchParams, router, pathname, isDemoRoute]);
 
 	const {
 		analyticsMap,
@@ -148,19 +168,23 @@ export default function FunnelsPage() {
 							className={cn("size-4 shrink-0", isFetching && "animate-spin")}
 						/>
 					</Button>
-					<Button onClick={() => setEditing("new")} size="sm">
-						<PlusIcon className="size-4 shrink-0" />
-						Create Funnel
-					</Button>
+					{!isDemoRoute && (
+						<Button onClick={() => setEditing("new")} size="sm">
+							<PlusIcon className="size-4 shrink-0" />
+							Create Funnel
+						</Button>
+					)}
 				</TopBar.Actions>
 
 				<div className="min-h-0 flex-1 overflow-y-auto overscroll-none">
 					<List.Content
 						emptyProps={{
-							action: {
-								label: "Create a funnel",
-								onClick: () => setEditing("new"),
-							},
+							action: isDemoRoute
+								? undefined
+								: {
+										label: "Create a funnel",
+										onClick: () => setEditing("new"),
+									},
 							description:
 								"Define a multi-step journey to see where users drop off.",
 							icon: <FunnelIcon className="size-6" weight="duotone" />,
@@ -189,6 +213,7 @@ export default function FunnelsPage() {
 									setExpandedId(expandedId === funnelId ? null : funnelId);
 									setSelectedReferrer("all");
 								}}
+								readOnly={isDemoRoute}
 							>
 								{(funnel) => {
 									if (expandedId !== funnel.id) {
@@ -220,7 +245,7 @@ export default function FunnelsPage() {
 					</List.Content>
 				</div>
 
-				{editing !== null && (
+				{!isDemoRoute && editing !== null && (
 					<EditFunnelDialog
 						autocompleteData={autocomplete.data}
 						funnel={
@@ -241,7 +266,7 @@ export default function FunnelsPage() {
 					/>
 				)}
 
-				{!!deletingId && (
+				{!isDemoRoute && !!deletingId && (
 					<DeleteDialog
 						confirmLabel="Delete Funnel"
 						isOpen={!!deletingId}

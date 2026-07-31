@@ -1,3 +1,4 @@
+import { CUSTOM_EVENTS_VISITOR_KEY } from "@databuddy/db/clickhouse";
 import { Analytics } from "../../types/tables";
 import { appendFilterClause } from "../simple-builder";
 import type { Filter, SimpleQueryConfig } from "../types";
@@ -39,6 +40,11 @@ function separatePropertyKeyConditions(filterConditions?: string[]): {
 
 export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 	custom_events: {
+		meta: {
+			description: "Custom event names with occurrence counts.",
+			category: "Custom Events",
+			tags: ["custom-events", "events"],
+		},
 		customSql: (ctx) => {
 			const {
 				websiteId: projectId,
@@ -55,12 +61,12 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 					SELECT
 						event_name as name,
 						COUNT(*) as total_events,
-						uniq(anonymous_id) as unique_users,
+						uniq(${CUSTOM_EVENTS_VISITOR_KEY}) as unique_users,
 						uniq(session_id) as unique_sessions,
 						MAX(timestamp) as last_occurrence,
 						MIN(timestamp) as first_occurrence,
 						countIf(properties != '{}' AND isValidJSON(properties)) as events_with_properties,
-						ROUND((uniq(anonymous_id) / SUM(uniq(anonymous_id)) OVER()) * 100, 2) as percentage
+						ROUND((uniq(${CUSTOM_EVENTS_VISITOR_KEY}) / SUM(uniq(${CUSTOM_EVENTS_VISITOR_KEY})) OVER()) * 100, 2) as percentage
 					FROM ${Analytics.custom_events}
 					WHERE
 						${projectWhereClause(filterParams)}
@@ -83,6 +89,7 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 		},
 		timeField: "timestamp",
 		allowedFilters: [
+			"profile_id",
 			"namespace",
 			"website_id",
 			"anonymous_id",
@@ -93,6 +100,12 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 		customizable: true,
 	},
 	custom_event_properties: {
+		meta: {
+			description:
+				"Property keys and values for custom events. Use this to inspect the payload of a specific event (e.g. decline codes or plan tiers on payment events) by filtering on event_name. Works for server-side events that have no page path.",
+			category: "Custom Events",
+			tags: ["custom-events", "properties"],
+		},
 		customSql: (ctx) => {
 			const {
 				websiteId: projectId,
@@ -148,6 +161,7 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 		},
 		timeField: "timestamp",
 		allowedFilters: [
+			"profile_id",
 			"namespace",
 			"website_id",
 			"anonymous_id",
@@ -160,6 +174,12 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 	},
 
 	custom_events_by_path: {
+		meta: {
+			description:
+				"Custom event occurrences grouped by page path. Only covers events fired from a page; server-side events (webhooks, payments, API) have no path and are excluded, so use custom_event_properties or custom_events for those.",
+			category: "Custom Events",
+			tags: ["custom-events", "pages"],
+		},
 		customSql: (ctx) => {
 			const {
 				websiteId: projectId,
@@ -177,7 +197,7 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 						path as name,
 						COUNT(*) as total_events,
 						uniq(event_name) as unique_event_types,
-						uniq(anonymous_id) as unique_users
+						uniq(${CUSTOM_EVENTS_VISITOR_KEY}) as unique_users
 					FROM ${Analytics.custom_events}
 					WHERE
 						${projectWhereClause(filterParams)}
@@ -200,11 +220,16 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 			};
 		},
 		timeField: "timestamp",
-		allowedFilters: ["path", "event_name", "website_id"],
+		allowedFilters: ["profile_id", "path", "event_name", "website_id"],
 		customizable: true,
 	},
 
 	custom_events_trends: {
+		meta: {
+			description: "Custom event counts plotted over time.",
+			category: "Custom Events",
+			tags: ["custom-events", "time-series"],
+		},
 		customSql: (ctx) => {
 			const {
 				websiteId: projectId,
@@ -222,7 +247,7 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 						toDate(timestamp) as date,
 						COUNT(*) as total_events,
 						uniq(event_name) as unique_event_types,
-						uniq(anonymous_id) as unique_users,
+						uniq(${CUSTOM_EVENTS_VISITOR_KEY}) as unique_users,
 						uniq(session_id) as unique_sessions,
 						uniq(path) as unique_pages
 					FROM ${Analytics.custom_events}
@@ -246,10 +271,15 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 			};
 		},
 		timeField: "timestamp",
-		allowedFilters: ["path", "event_name", "website_id"],
+		allowedFilters: ["profile_id", "path", "event_name", "website_id"],
 	},
 
 	custom_events_trends_by_event: {
+		meta: {
+			description: "Custom event counts over time, broken down per event name.",
+			category: "Custom Events",
+			tags: ["custom-events", "time-series", "breakdown"],
+		},
 		customSql: (ctx) => {
 			const {
 				websiteId: projectId,
@@ -288,10 +318,16 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 			};
 		},
 		timeField: "timestamp",
-		allowedFilters: ["path", "event_name", "website_id"],
+		allowedFilters: ["profile_id", "path", "event_name", "website_id"],
 	},
 
 	custom_events_summary: {
+		meta: {
+			description:
+				"Summary statistics for custom events (total count, unique users).",
+			category: "Custom Events",
+			tags: ["custom-events", "summary"],
+		},
 		customSql: (ctx) => {
 			const {
 				websiteId: projectId,
@@ -307,7 +343,7 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 					SELECT
 						COUNT(*) as total_events,
 						uniq(event_name) as unique_event_types,
-						uniq(anonymous_id) as unique_users,
+						uniq(${CUSTOM_EVENTS_VISITOR_KEY}) as unique_users,
 						uniq(session_id) as unique_sessions,
 						uniq(path) as unique_pages
 					FROM ${Analytics.custom_events}
@@ -327,10 +363,15 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 			};
 		},
 		timeField: "timestamp",
-		allowedFilters: ["path", "event_name", "website_id"],
+		allowedFilters: ["profile_id", "path", "event_name", "website_id"],
 	},
 
 	custom_events_property_cardinality: {
+		meta: {
+			description: "Number of unique values per custom event property.",
+			category: "Custom Events",
+			tags: ["custom-events", "properties", "cardinality"],
+		},
 		customSql: (ctx) => {
 			const {
 				websiteId: projectId,
@@ -392,10 +433,21 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 			};
 		},
 		timeField: "timestamp",
-		allowedFilters: ["path", "event_name", "website_id", "property_key"],
+		allowedFilters: [
+			"profile_id",
+			"path",
+			"event_name",
+			"website_id",
+			"property_key",
+		],
 	},
 
 	custom_events_recent: {
+		meta: {
+			description: "Most recent custom event occurrences.",
+			category: "Custom Events",
+			tags: ["custom-events", "recent"],
+		},
 		customSql: (ctx) => {
 			const {
 				websiteId: projectId,
@@ -441,7 +493,7 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 			};
 		},
 		timeField: "timestamp",
-		allowedFilters: ["path", "event_name", "website_id"],
+		allowedFilters: ["profile_id", "path", "event_name", "website_id"],
 	},
 
 	/**
@@ -457,6 +509,12 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 	 * - sample_values: top 5 values with counts
 	 */
 	custom_events_property_classification: {
+		meta: {
+			description:
+				"Classification of property types (string, number, boolean) per event.",
+			category: "Custom Events",
+			tags: ["custom-events", "properties", "schema"],
+		},
 		customSql: (ctx) => {
 			const {
 				websiteId: projectId,
@@ -581,7 +639,13 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 			};
 		},
 		timeField: "timestamp",
-		allowedFilters: ["path", "event_name", "website_id", "property_key"],
+		allowedFilters: [
+			"profile_id",
+			"path",
+			"event_name",
+			"website_id",
+			"property_key",
+		],
 	},
 
 	/**
@@ -589,6 +653,11 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 	 * Use this when render_strategy is 'top_n_chart' or 'top_n_with_other'
 	 */
 	custom_events_property_top_values: {
+		meta: {
+			description: "Most common values for a specific custom event property.",
+			category: "Custom Events",
+			tags: ["custom-events", "properties", "values"],
+		},
 		customSql: (ctx) => {
 			const {
 				websiteId: projectId,
@@ -668,7 +737,13 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 			};
 		},
 		timeField: "timestamp",
-		allowedFilters: ["path", "event_name", "website_id", "property_key"],
+		allowedFilters: [
+			"profile_id",
+			"path",
+			"event_name",
+			"website_id",
+			"property_key",
+		],
 	},
 
 	/**
@@ -676,6 +751,11 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 	 * Returns all values with counts and percentages
 	 */
 	custom_events_property_distribution: {
+		meta: {
+			description: "Value distribution for a specific custom event property.",
+			category: "Custom Events",
+			tags: ["custom-events", "properties", "distribution"],
+		},
 		customSql: (ctx) => {
 			const {
 				websiteId: projectId,
@@ -753,7 +833,13 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 			};
 		},
 		timeField: "timestamp",
-		allowedFilters: ["path", "event_name", "website_id", "property_key"],
+		allowedFilters: [
+			"profile_id",
+			"path",
+			"event_name",
+			"website_id",
+			"property_key",
+		],
 	},
 
 	/**
@@ -778,7 +864,7 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 						SELECT
 							event_name,
 							COUNT(*) as total_events,
-							uniq(anonymous_id) as unique_users,
+							uniq(${CUSTOM_EVENTS_VISITOR_KEY}) as unique_users,
 							uniq(session_id) as unique_sessions
 						FROM ${Analytics.custom_events}
 						WHERE
@@ -864,8 +950,10 @@ export const CustomEventsBuilders: Record<string, SimpleQueryConfig> = {
 			title: "Custom Events Discovery",
 			description:
 				"Returns all custom events with their property keys and top 5 values per property in a single query. Use this instead of calling custom_events, custom_event_properties, and custom_events_property_top_values separately.",
+			category: "Custom Events",
+			tags: ["custom-events", "discovery", "properties"],
 		},
 		timeField: "timestamp",
-		allowedFilters: ["path", "event_name", "website_id"],
+		allowedFilters: ["profile_id", "path", "event_name", "website_id"],
 	},
 };

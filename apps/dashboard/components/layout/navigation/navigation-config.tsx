@@ -58,7 +58,17 @@ export const mainNavigation: NavigationGroup[] = [
 		items: [
 			createNavItem("Home", HouseIcon, "/home"),
 			createNavItem("Websites", GlobeIcon, "/websites"),
-			createNavItem("Insights", LightbulbIcon, "/insights"),
+			createNavItem("Insights", LightbulbIcon, "/insights", {
+				activeMatch: "prefix",
+				searchItems: [
+					{
+						name: "Investigations",
+						href: "/insights#investigations",
+						icon: LightbulbIcon,
+						searchTags: ["cases", "open work"],
+					},
+				],
+			}),
 			createNavItem("Databunny", RobotIcon, "/agent", {
 				activeMatch: "prefix",
 				alpha: true,
@@ -122,6 +132,7 @@ export const websiteNavigation: NavigationGroup[] = [
 				rootLevel: false,
 				flag: "realtime",
 				alpha: true,
+				hideFromDemo: true,
 			}),
 			createNavItem("Audience", UsersThreeIcon, "/audience", {
 				rootLevel: false,
@@ -147,6 +158,7 @@ export const websiteNavigation: NavigationGroup[] = [
 				rootLevel: false,
 				alpha: true,
 				flag: "anomalies",
+				hideFromDemo: true,
 			}),
 			createNavItem("Pulse", PulseIcon, "/pulse", {
 				rootLevel: false,
@@ -179,6 +191,7 @@ export const websiteNavigation: NavigationGroup[] = [
 			createNavItem("Users", IdentificationBadgeIcon, "/users", {
 				rootLevel: false,
 				gatedFeature: GATED_FEATURES.USERS,
+				hideFromDemo: true,
 			}),
 			createNavItem("Funnels", FunnelIcon, "/funnels", {
 				rootLevel: false,
@@ -192,11 +205,13 @@ export const websiteNavigation: NavigationGroup[] = [
 				alpha: true,
 				rootLevel: false,
 				gatedFeature: GATED_FEATURES.FEATURE_FLAGS,
+				hideFromDemo: true,
 			}),
 			createNavItem("Revenue", CurrencyDollarIcon, "/revenue", {
 				alpha: true,
 				rootLevel: false,
 				flag: "revenue",
+				hideFromDemo: true,
 			}),
 		],
 	},
@@ -206,6 +221,7 @@ export const websiteNavigation: NavigationGroup[] = [
 			createNavItem("Databunny", RobotIcon, "/agent", {
 				alpha: true,
 				rootLevel: false,
+				hideFromDemo: true,
 			}),
 		],
 	},
@@ -215,18 +231,23 @@ export const websiteNavigation: NavigationGroup[] = [
 		items: [
 			createNavItem("General", GearIcon, "/settings/general", {
 				rootLevel: false,
+				hideFromDemo: true,
 			}),
 			createNavItem("Security", LockIcon, "/settings/security", {
 				rootLevel: false,
+				hideFromDemo: true,
 			}),
 			createNavItem("Transfer", ArrowSquareOutIcon, "/settings/transfer", {
 				rootLevel: false,
+				hideFromDemo: true,
 			}),
 			createNavItem("Data Export", FileArrowDownIcon, "/settings/export", {
 				rootLevel: false,
+				hideFromDemo: true,
 			}),
 			createNavItem("Setup", CodeIcon, "/settings/tracking", {
 				rootLevel: false,
+				hideFromDemo: true,
 				searchTags: [
 					"tracking setup",
 					"install script",
@@ -254,7 +275,7 @@ export const settingsNavigation: NavigationGroup[] = [
 						searchTags: ["workspace details", "organization id", "slug"],
 					},
 					{
-						name: "Workspace Websites",
+						name: "Organization Websites",
 						href: "#websites",
 						icon: GlobeIcon,
 						searchTags: ["organization websites", "workspace sites"],
