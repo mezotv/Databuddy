@@ -13,9 +13,46 @@ import { OutroScene } from "./compositions/bubbly-intelligence/OutroScene";
 import { PromiseScene } from "./compositions/bubbly-intelligence/PromiseScene";
 import { ProofScene } from "./compositions/bubbly-intelligence/ProofScene";
 import { SignalScene } from "./compositions/bubbly-intelligence/SignalScene";
+import {
+	IntelligenceV2,
+	intelligenceV2DurationInFrames,
+	intelligenceV2Scenes,
+} from "./compositions/IntelligenceV2";
+
+const v2SceneIds = [
+	"V2-1-Ship",
+	"V2-2-Break",
+	"V2-3-Notice",
+	"V2-4-Investigate",
+	"V2-5-Fix",
+	"V2-6-Recover",
+	"V2-7-Connect",
+	"V2-8-Outro",
+] as const;
 
 export const RemotionRoot: React.FC = () => (
 	<>
+		<Composition
+			component={IntelligenceV2}
+			durationInFrames={intelligenceV2DurationInFrames}
+			fps={30}
+			height={1080}
+			id="IntelligenceV2"
+			width={1920}
+		/>
+		<Folder name="Intelligence-v2-scenes">
+			{intelligenceV2Scenes.map((scene, index) => (
+				<Composition
+					component={scene.component}
+					durationInFrames={scene.durationInFrames}
+					fps={30}
+					height={1080}
+					id={v2SceneIds[index]}
+					key={v2SceneIds[index]}
+					width={1920}
+				/>
+			))}
+		</Folder>
 		<Folder name="Bubbly-intelligence-release-scenes">
 			<Composition
 				component={ArrivalScene}
